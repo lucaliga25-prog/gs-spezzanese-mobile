@@ -8,6 +8,7 @@ from datetime import date
 from functools import wraps
 
 from flask import Flask, request, redirect, url_for, session, flash, get_flashed_messages
+from datetime import date, timedelta
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -251,7 +252,131 @@ def last_match():
     return rows[0] if rows else None
 
 
-def login_required(kind=None):
+# ---------------------------------------------------------------------------
+# AWARD HELPERS — query ottimizzate, una sola chiamata al DB ciascuna
+# ---------------------------------------------------------------------------
+
+def get_best_player_last_match():
+    """
+    Restituisce il giocatore con la media voto più alta nell'ultima partita
+    inserita (quella con almeno un giocatore sopra i 10 minuti).
+    Una sola query con CTE per evitare round-trip multipli al DB.
+    """
+    rows = db_query("""
+        WITH last_m AS (
+            SELECT m.id AS match_id, m.match_date, m.opponent
+            FROM matches m
+            WHERE EXISTS (
+                SELECT 1 FROM appearances a
+                WHERE a.match_id = m.id AND COALESCE(a.minutes,0) > 10
+            )
+            ORDER BY m.match_date DESC, m.id DESC
+            LIMIT 1
+        ),
+        ranked AS (
+            SELECT
+                p.id,
+                p.first_name,
+                p.last_name,
+                COALESCE(p.role,'') AS role,
+                COALESCE(p.photo_data,'') AS photo_data,
+                COALESCE(p.photo_mime,'image/jpeg') AS photo_mime,
+                lm.match_date,
+                lm.opponent,
+                ROUND(AVG(v.rating)::numeric, 2) AS media_voto,
+                COUNT(v.id) AS num_voti
+            FROM last_m lm
+            JOIN player_votes v ON v.match_id = lm.match_id
+            JOIN players p ON p.id = v.voted_player_id
+            GROUP BY p.id, p.first_name, p.last_name, p.role,
+                     p.photo_data, p.photo_mime, lm.match_date, lm.opponent
+            ORDER BY media_voto DESC, num_voti DESC
+            LIMIT 1
+        )
+        SELECT * FROM ranked
+    """, fetch=True)
+    return rows[0] if rows else None
+
+
+def get_best_player_last_month():
+    """
+    Restituisce il giocatore con la media voto più alta nel mese precedente.
+    Una sola query con CTE; il calcolo dell'intervallo è fatto in Python
+    per semplicità e non aggiunge latenza al DB.
+    """
+    today = date.today()
+    # Primo giorno del mese corrente → ultimo giorno del mese scorso
+    first_this_month = today.replace(day=1)
+    last_month_end = first_this_month - timedelta(days=1)
+    last_month_start = last_month_end.replace(day=1)
+
+    rows = db_query("""
+        SELECT
+            p.id,
+            p.first_name,
+            p.last_name,
+            COALESCE(p.role,'') AS role,
+            COALESCE(p.photo_data,'') AS photo_data,
+            COALESCE(p.photo_mime,'image/jpeg') AS photo_mime,
+            ROUND(AVG(v.rating)::numeric, 2) AS media_voto,
+            COUNT(v.id) AS num_voti
+        FROM player_votes v
+        JOIN matches m ON m.id = v.match_id
+        JOIN players p ON p.id = v.voted_player_id
+        WHERE m.match_date BETWEEN ? AND ?
+        GROUP BY p.id, p.first_name, p.last_name, p.role, p.photo_data, p.photo_mime
+        ORDER BY media_voto DESC, num_voti DESC
+        LIMIT 1
+    """, (last_month_start.isoformat(), last_month_end.isoformat()), fetch=True)
+
+    if rows:
+        rows[0]["month_label"] = last_month_end.strftime("%B %Y")
+    return rows[0] if rows else None
+
+
+def _render_week_card(p):
+    """Genera HTML della figurina nera+oro per il miglior giocatore della settimana."""
+    full_name = f"{p['last_name']} {p['first_name']}".strip()
+    if p["photo_data"]:
+        photo_html = f"<img class='card-photo-award' src='data:{p['photo_mime']};base64,{p['photo_data']}' alt='Foto'>"
+    else:
+        photo_html = "<div class='card-placeholder-award'>👤</div>"
+    match_info = f"{ui_date(p['match_date'])} · {p['opponent']}"
+    return f"""
+    <div class="award-card-week">
+        <span class="lightning left">⚡</span>
+        <span class="lightning right">⚡</span>
+        <div><span class="award-badge">⭐ Man of the Match</span></div>
+        {photo_html}
+        <div class="award-name">{full_name}</div>
+        <div class="award-role">{p['role'] or '-'}</div>
+        <div class="award-score">{p['media_voto']}</div>
+        <div class="award-label">Media voto partita</div>
+        <div class="award-meta">{match_info}</div>
+    </div>
+    """
+
+
+def _render_month_card(p):
+    """Genera HTML della figurina rossa+blu per il miglior giocatore del mese."""
+    full_name = f"{p['last_name']} {p['first_name']}".strip()
+    if p["photo_data"]:
+        photo_html = f"<img class='card-photo-award' src='data:{p['photo_mime']};base64,{p['photo_data']}' alt='Foto'>"
+    else:
+        photo_html = "<div class='card-placeholder-award'>👤</div>"
+    month_label = p.get("month_label", "")
+    return f"""
+    <div class="award-card-month">
+        <div><span class="award-badge-month">🏆 Giocatore del Mese</span></div>
+        {photo_html}
+        <div class="award-name">{full_name}</div>
+        <div class="award-role">{p['role'] or '-'}</div>
+        <div class="award-score">{p['media_voto']}</div>
+        <div class="award-label">Media voto · {month_label}</div>
+    </div>
+    """
+
+
     def decorator(fn):
         @wraps(fn)
         def wrapper(*args, **kwargs):
@@ -403,6 +528,127 @@ BASE_STYLE = """
     font-size:12px;
     border-radius:10px;
 }
+
+/* ===== FIGURINA DELLA SETTIMANA (nera + fulmini oro) ===== */
+.award-card-week{
+    background:linear-gradient(160deg,#0a0a0a 0%,#1a1a1a 40%,#111 100%);
+    border:2px solid #d4a017;
+    border-radius:22px;
+    padding:20px 16px 18px;
+    margin-bottom:14px;
+    box-shadow:0 0 30px rgba(212,160,23,.35),0 8px 28px rgba(0,0,0,.6);
+    position:relative;
+    overflow:hidden;
+    text-align:center;
+}
+.award-card-week .lightning{
+    position:absolute;
+    top:10px;
+    font-size:22px;
+    opacity:.9;
+    filter:drop-shadow(0 0 6px #f5c518);
+}
+.award-card-week .lightning.left{left:12px;transform:rotate(-15deg)}
+.award-card-week .lightning.right{right:12px;transform:rotate(15deg)}
+.award-card-week .award-badge{
+    display:inline-block;
+    background:linear-gradient(135deg,#b8860b,#f5c518,#b8860b);
+    color:#0a0a0a;
+    font-weight:900;
+    font-size:11px;
+    padding:3px 12px;
+    border-radius:20px;
+    letter-spacing:.8px;
+    text-transform:uppercase;
+    margin-bottom:12px;
+}
+.award-card-week .card-photo-award{
+    width:130px;
+    height:130px;
+    object-fit:cover;
+    border-radius:50%;
+    border:4px solid #d4a017;
+    box-shadow:0 0 20px rgba(212,160,23,.5);
+    background:#1a1a1a;
+}
+.award-card-week .card-placeholder-award{
+    width:130px;
+    height:130px;
+    border-radius:50%;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    margin:0 auto;
+    background:#1a1a1a;
+    font-size:54px;
+    border:4px solid #d4a017;
+    box-shadow:0 0 20px rgba(212,160,23,.5);
+}
+.award-card-week .award-name{
+    font-size:22px;
+    font-weight:900;
+    color:#f5c518;
+    margin-top:12px;
+    text-shadow:0 0 10px rgba(245,197,24,.4);
+}
+.award-card-week .award-role{color:#d4a017;font-weight:700;font-size:13px;margin-top:3px;}
+.award-card-week .award-score{
+    font-size:36px;font-weight:900;color:#f5c518;
+    text-shadow:0 0 16px rgba(245,197,24,.6);margin:10px 0 4px;
+}
+.award-card-week .award-label{font-size:11px;font-weight:800;color:#b8860b;letter-spacing:.6px;text-transform:uppercase;}
+.award-card-week .award-meta{font-size:12px;color:#888;margin-top:8px;}
+
+/* ===== FIGURINA DEL MESE (rossa + blu) ===== */
+.award-card-month{
+    background:linear-gradient(160deg,#1a0010 0%,#0d001f 50%,#1a000a 100%);
+    border:2px solid #dc2626;
+    border-radius:22px;
+    padding:20px 16px 18px;
+    margin-bottom:14px;
+    box-shadow:0 0 30px rgba(220,38,38,.3),0 0 30px rgba(37,99,235,.2),0 8px 28px rgba(0,0,0,.7);
+    position:relative;
+    overflow:hidden;
+    text-align:center;
+}
+.award-card-month .award-badge-month{
+    display:inline-block;
+    background:linear-gradient(135deg,#dc2626,#1e40af);
+    color:#fff;
+    font-weight:900;
+    font-size:11px;
+    padding:3px 12px;
+    border-radius:20px;
+    letter-spacing:.8px;
+    text-transform:uppercase;
+    margin-bottom:12px;
+}
+.award-card-month .card-photo-award{
+    width:130px;height:130px;object-fit:cover;border-radius:50%;
+    border:4px solid #dc2626;
+    box-shadow:0 0 18px rgba(220,38,38,.5),0 0 18px rgba(37,99,235,.3);
+    background:#1a0010;
+}
+.award-card-month .card-placeholder-award{
+    width:130px;height:130px;border-radius:50%;display:flex;align-items:center;
+    justify-content:center;margin:0 auto;background:#1a0010;font-size:54px;
+    border:4px solid #dc2626;box-shadow:0 0 18px rgba(220,38,38,.5);
+}
+.award-card-month .award-name{
+    font-size:22px;font-weight:900;
+    background:linear-gradient(135deg,#ef4444,#60a5fa);
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
+    margin-top:12px;
+}
+.award-card-month .award-role{color:#93c5fd;font-weight:700;font-size:13px;margin-top:3px;}
+.award-card-month .award-score{
+    font-size:36px;font-weight:900;
+    background:linear-gradient(135deg,#ef4444,#60a5fa);
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
+    margin:10px 0 4px;
+}
+.award-card-month .award-label{font-size:11px;font-weight:800;color:#93c5fd;letter-spacing:.6px;text-transform:uppercase;}
+.award-card-month .award-meta{font-size:12px;color:#666;margin-top:8px;}
 </style>
 """
 
@@ -455,10 +701,50 @@ def logout():
     return redirect(url_for("home"))
 
 
+# ---------------------------------------------------------------------------
+# ROUTE: Figurine premi (accessibile sia a giocatori che all'allenatore)
+# ---------------------------------------------------------------------------
 
-@app.route("/player", methods=["GET", "POST"])
-@login_required("player")
-def player_home():
+@app.route("/awards")
+@login_required()
+def awards():
+    """Pagina con le due figurine speciali: settimana e mese."""
+    # Eseguiamo le due query in parallelo logico — entrambe ottimizzate con CTE
+    week_player = get_best_player_last_match()
+    month_player = get_best_player_last_month()
+
+    week_html = _render_week_card(week_player) if week_player else (
+        "<div class='card' style='text-align:center;color:#888'>"
+        "⚡ Nessun voto inserito per l'ultima partita.</div>"
+    )
+    month_html = _render_month_card(month_player) if month_player else (
+        "<div class='card' style='text-align:center;color:#888'>"
+        "🏆 Nessun voto disponibile per il mese scorso.</div>"
+    )
+
+    back_url = url_for("coach_panel") if session.get("role") == "coach" else url_for("player_home")
+
+    content = f"""
+    <div style="margin-bottom:6px;">
+        <div style="font-size:13px;color:#64748b;font-weight:700;
+                    text-transform:uppercase;letter-spacing:.6px;margin-bottom:10px;">
+            ⚡ Man of the Match
+        </div>
+        {week_html}
+    </div>
+    <div>
+        <div style="font-size:13px;color:#64748b;font-weight:700;
+                    text-transform:uppercase;letter-spacing:.6px;margin-bottom:10px;">
+            🏆 Giocatore del Mese
+        </div>
+        {month_html}
+    </div>
+    <a class="btn btn-blue" href="{back_url}">Indietro</a>
+    """
+    return page("Premi", "Le figurine speciali della squadra", content)
+
+
+
     voter_id = session["player_id"]
 
     if request.method == "POST":
@@ -502,6 +788,7 @@ def player_home():
         <a class="btn btn-blue" href="/player/matches">Scegli partita da votare</a>
         <a class="btn btn-green" href="/player/card">Visualizza la mia figurina</a>
         <a class="btn btn-dark" href="/player/history">Storico prestazioni</a>
+        <a class="btn" style="background:linear-gradient(135deg,#b8860b,#f5c518);color:#0a0a0a;font-weight:900;" href="/awards">⚡ Figurine Premi</a>
         <a class="btn" href="/logout">Esci</a>
     </div>
     """
@@ -940,7 +1227,7 @@ def player_votes(match_id):
 @login_required("coach")
 def coach_panel():
     content = """
-    <div class="card"><h2>Pannello allenatore</h2><div class="tabs"><a class="btn btn-blue" href="/coach/matches">Partite</a><a class="btn btn-green" href="/coach/formation">Formazione</a><a class="btn btn-dark" href="/coach/training">Allenamenti</a><a class="btn btn-blue" href="/coach/player-stats">Statistiche giocatori</a><a class="btn" href="/logout">Esci</a></div></div>
+    <div class="card"><h2>Pannello allenatore</h2><div class="tabs"><a class="btn btn-blue" href="/coach/matches">Partite</a><a class="btn btn-green" href="/coach/formation">Formazione</a><a class="btn btn-dark" href="/coach/training">Allenamenti</a><a class="btn btn-blue" href="/coach/player-stats">Statistiche giocatori</a><a class="btn" style="background:linear-gradient(135deg,#b8860b,#f5c518);color:#0a0a0a;font-weight:900;" href="/awards">⚡ Figurine Premi</a><a class="btn" href="/logout">Esci</a></div></div>
     """
     return page("Allenatore", "Gestione rapida da telefono", content)
 

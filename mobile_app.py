@@ -2,6 +2,7 @@ from pathlib import Path
 import os
 import base64
 import psycopg2
+from psycopg2.pool import SimpleConnectionPool
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from datetime import date
@@ -14,6 +15,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL non trovata. Controlla il file .env.")
 
+DB_POOL = SimpleConnectionPool(1, 8, dsn=DATABASE_URL)
+
+
 COACH_PASSWORD = "spezzanese2627"
 
 app = Flask(__name__)
@@ -21,22 +25,24 @@ app.secret_key = "gestionale-gs-spezzanese-mobile-secret"
 
 
 def db_query(query, params=(), fetch=False):
-    """Esegue query PostgreSQL usando la stessa sintassi con ? del vecchio SQLite."""
+    """Query PostgreSQL veloce con connection pool. Mantiene compatibilità con i placeholder ?."""
     pg_query = query.replace("?", "%s")
+    conn = DB_POOL.getconn()
+    cur = None
 
-    conn = psycopg2.connect(DATABASE_URL)
     try:
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute(pg_query, params)
         rows = cur.fetchall() if fetch else None
         conn.commit()
         return rows
+    except Exception:
+        conn.rollback()
+        raise
     finally:
-        try:
+        if cur is not None:
             cur.close()
-        except Exception:
-            pass
-        conn.close()
+        DB_POOL.putconn(conn)
 
 
 def ensure_db():

@@ -304,6 +304,54 @@ BASE_STYLE = """
     border:1px solid #dbe3ef;
     border-radius:14px;
 }
+.performance-card{
+    border:1px solid #dbe3ef;
+    border-radius:16px;
+    background:#ffffff;
+    padding:14px;
+    margin:10px 0;
+    box-shadow:0 6px 16px rgba(15,23,42,.05);
+}
+.performance-title{
+    font-weight:900;
+    font-size:16px;
+}
+.performance-meta{
+    color:#64748b;
+    font-size:12px;
+    margin-top:3px;
+}
+.performance-grid{
+    display:grid;
+    grid-template-columns:repeat(6,1fr);
+    gap:6px;
+    margin-top:12px;
+}
+.performance-stat{
+    background:#f8fafc;
+    border:1px solid #dbe3ef;
+    border-radius:12px;
+    padding:8px 4px;
+    text-align:center;
+}
+.performance-value{
+    font-size:17px;
+    font-weight:900;
+    color:#111827;
+}
+.performance-label{
+    font-size:10px;
+    font-weight:800;
+    color:#64748b;
+}
+.small-btn{
+    display:inline-block;
+    width:auto;
+    margin-top:6px;
+    padding:8px 10px;
+    font-size:12px;
+    border-radius:10px;
+}
 </style>
 """
 
@@ -737,137 +785,96 @@ def coach_player_stats():
     start_date = request.args.get("start_date", "").strip()
     end_date = request.args.get("end_date", "").strip()
 
-    where_match = ""
-    match_params = []
+    today = date.today().isoformat()
 
-    where_training = ""
-    training_params = []
+    # Se una data non è impostata, uso un intervallo larghissimo.
+    start_filter = start_date if start_date else "1900-01-01"
+    end_filter = end_date if end_date else "2999-12-31"
 
-    where_votes = ""
-    votes_params = []
-
-    if start_date and end_date:
-        where_match = "AND m.match_date BETWEEN ? AND ?"
-        match_params = [start_date, end_date]
-
-        where_training = "AND ts.training_date BETWEEN ? AND ?"
-        training_params = [start_date, end_date]
-
-        where_votes = "AND mv.match_date BETWEEN ? AND ?"
-        votes_params = [start_date, end_date]
-    elif start_date:
-        where_match = "AND m.match_date >= ?"
-        match_params = [start_date]
-
-        where_training = "AND ts.training_date >= ?"
-        training_params = [start_date]
-
-        where_votes = "AND mv.match_date >= ?"
-        votes_params = [start_date]
-    elif end_date:
-        where_match = "AND m.match_date <= ?"
-        match_params = [end_date]
-
-        where_training = "AND ts.training_date <= ?"
-        training_params = [end_date]
-
-        where_votes = "AND mv.match_date <= ?"
-        votes_params = [end_date]
-
-    query = f"""
+    rows = db_query("""
         SELECT
             p.id,
             trim(p.last_name || ' ' || p.first_name) AS player_name,
             COALESCE(p.role, '') AS role,
-            COALESCE((
-                SELECT COUNT(*)
-                FROM appearances a
-                JOIN matches m ON m.id=a.match_id
-                WHERE a.player_id=p.id
-                {where_match}
-            ), 0) AS presenze,
-            COALESCE((
-                SELECT SUM(CASE WHEN a.starter=1 THEN 1 ELSE 0 END)
-                FROM appearances a
-                JOIN matches m ON m.id=a.match_id
-                WHERE a.player_id=p.id
-                {where_match}
-            ), 0) AS titolare,
-            COALESCE((
-                SELECT COUNT(*)
-                FROM substitutions s
-                JOIN matches m ON m.id=s.match_id
-                WHERE s.player_in_id=p.id
-                {where_match}
-            ), 0) AS subentrato,
-            COALESCE((
-                SELECT COUNT(*)
-                FROM substitutions s
-                JOIN matches m ON m.id=s.match_id
-                WHERE s.player_out_id=p.id
-                {where_match}
-            ), 0) AS sostituito,
-            COALESCE((
-                SELECT SUM(a.minutes)
-                FROM appearances a
-                JOIN matches m ON m.id=a.match_id
-                WHERE a.player_id=p.id
-                {where_match}
-            ), 0) AS minuti,
-            COALESCE((
-                SELECT SUM(a.goals)
-                FROM appearances a
-                JOIN matches m ON m.id=a.match_id
-                WHERE a.player_id=p.id
-                {where_match}
-            ), 0) AS gol,
-            COALESCE((
-                SELECT SUM(a.assists)
-                FROM appearances a
-                JOIN matches m ON m.id=a.match_id
-                WHERE a.player_id=p.id
-                {where_match}
-            ), 0) AS assist,
-            COALESCE((
-                SELECT SUM(a.yellow_cards)
-                FROM appearances a
-                JOIN matches m ON m.id=a.match_id
-                WHERE a.player_id=p.id
-                {where_match}
-            ), 0) AS ammonizioni,
-            COALESCE((
-                SELECT SUM(a.red_cards)
-                FROM appearances a
-                JOIN matches m ON m.id=a.match_id
-                WHERE a.player_id=p.id
-                {where_match}
-            ), 0) AS espulsioni,
-            COALESCE((
-                SELECT SUM(CASE WHEN ta.present=1 THEN 1 ELSE 0 END)
-                FROM training_attendance ta
-                JOIN training_sessions ts ON ts.id=ta.session_id
-                WHERE ta.player_id=p.id
-                {where_training}
-            ), 0) AS all_presenti,
-            COALESCE((
-                SELECT ROUND(AVG(v.rating)::numeric, 2)
-                FROM player_votes v
-                JOIN matches mv ON mv.id=v.match_id
-                WHERE v.voted_player_id=p.id
-                {where_votes}
-            ), 0) AS media_voto
+
+            COALESCE(ms.presenze, 0) AS presenze,
+            COALESCE(ms.titolare, 0) AS titolare,
+            COALESCE(si.subentrato, 0) AS subentrato,
+            COALESCE(so.sostituito, 0) AS sostituito,
+            COALESCE(ms.minuti, 0) AS minuti,
+            COALESCE(ms.gol, 0) AS gol,
+            COALESCE(ms.assist, 0) AS assist,
+            COALESCE(ms.ammonizioni, 0) AS ammonizioni,
+            COALESCE(ms.espulsioni, 0) AS espulsioni,
+            COALESCE(tr.all_presenti, 0) AS all_presenti,
+            COALESCE(vt.media_voto, 0) AS media_voto
+
         FROM players p
-        ORDER BY minuti DESC, p.last_name, p.first_name
-    """
 
-    # La stessa condizione partite compare 8 volte nella query.
-    params = []
-    for _ in range(8):
-        params.extend(match_params)
-    params.extend(training_params)
-    params.extend(votes_params)
+        LEFT JOIN (
+            SELECT
+                a.player_id,
+                COUNT(*) AS presenze,
+                SUM(CASE WHEN a.starter=1 THEN 1 ELSE 0 END) AS titolare,
+                SUM(a.minutes) AS minuti,
+                SUM(a.goals) AS gol,
+                SUM(a.assists) AS assist,
+                SUM(a.yellow_cards) AS ammonizioni,
+                SUM(a.red_cards) AS espulsioni
+            FROM appearances a
+            JOIN matches m ON m.id=a.match_id
+            WHERE m.match_date BETWEEN ? AND ?
+            GROUP BY a.player_id
+        ) ms ON ms.player_id=p.id
 
-    rows = db_query(query, tuple(params), fetch=True)
+        LEFT JOIN (
+            SELECT
+                s.player_in_id AS player_id,
+                COUNT(*) AS subentrato
+            FROM substitutions s
+            JOIN matches m ON m.id=s.match_id
+            WHERE m.match_date BETWEEN ? AND ?
+            GROUP BY s.player_in_id
+        ) si ON si.player_id=p.id
+
+        LEFT JOIN (
+            SELECT
+                s.player_out_id AS player_id,
+                COUNT(*) AS sostituito
+            FROM substitutions s
+            JOIN matches m ON m.id=s.match_id
+            WHERE m.match_date BETWEEN ? AND ?
+            GROUP BY s.player_out_id
+        ) so ON so.player_id=p.id
+
+        LEFT JOIN (
+            SELECT
+                ta.player_id,
+                SUM(CASE WHEN ta.present=1 THEN 1 ELSE 0 END) AS all_presenti
+            FROM training_attendance ta
+            JOIN training_sessions ts ON ts.id=ta.session_id
+            WHERE ts.training_date BETWEEN ? AND ?
+            GROUP BY ta.player_id
+        ) tr ON tr.player_id=p.id
+
+        LEFT JOIN (
+            SELECT
+                v.voted_player_id AS player_id,
+                ROUND(AVG(v.rating)::numeric, 2) AS media_voto
+            FROM player_votes v
+            JOIN matches m ON m.id=v.match_id
+            WHERE m.match_date BETWEEN ? AND ?
+            GROUP BY v.voted_player_id
+        ) vt ON vt.player_id=p.id
+
+        ORDER BY COALESCE(ms.minuti,0) DESC, p.last_name, p.first_name
+    """, (
+        start_filter, end_filter,
+        start_filter, end_filter,
+        start_filter, end_filter,
+        start_filter, end_filter,
+        start_filter, end_filter,
+    ), fetch=True)
 
     table_rows = ""
 
@@ -885,19 +892,17 @@ def coach_player_stats():
             <td>{r['ammonizioni']}</td>
             <td>{r['espulsioni']}</td>
             <td>{r['all_presenti']}</td>
-            <td><b>{r['media_voto']}</b></td>
+            <td><b>{r['media_voto']}</b><br><a class="btn btn-blue small-btn" href="/coach/player-stats/{r['id']}">Storico prestazioni</a></td>
         </tr>
         """
 
     if not table_rows:
         table_rows = "<tr><td colspan='12'>Nessun giocatore presente.</td></tr>"
 
-    today = date.today().isoformat()
-
     content = f"""
     <div class="card">
         <h2>Statistiche giocatori</h2>
-        <div class="small">Filtra le statistiche per periodo. Include anche le presenze agli allenamenti.</div>
+        <div class="small">Filtra le statistiche per periodo. Se nel periodo non ci sono dati, i giocatori vengono mostrati con tutti i valori a 0.</div>
 
         <form method="get">
             <div class="inline">
@@ -945,6 +950,132 @@ def coach_player_stats():
     """
 
     return page("Statistiche giocatori", "Area allenatore", content)
+
+
+
+@app.route("/coach/player-stats/<int:player_id>")
+@login_required("coach")
+def coach_player_history(player_id):
+    start_date = request.args.get("start_date", "").strip()
+    end_date = request.args.get("end_date", "").strip()
+
+    start_filter = start_date if start_date else "1900-01-01"
+    end_filter = end_date if end_date else "2999-12-31"
+
+    player_rows = db_query("""
+        SELECT id, trim(last_name || ' ' || first_name) AS player_name, COALESCE(role, '') AS role
+        FROM players
+        WHERE id=?
+    """, (player_id,), fetch=True)
+
+    if not player_rows:
+        flash("Giocatore non trovato.")
+        return redirect(url_for("coach_player_stats"))
+
+    player = player_rows[0]
+
+    rows = db_query("""
+        SELECT
+            m.id AS match_id,
+            m.match_date,
+            m.opponent,
+            m.competition,
+            m.home_away,
+            COALESCE(m.result, '') AS result,
+            COALESCE(a.starter, 0) AS starter,
+            COALESCE(a.minutes, 0) AS minutes,
+            COALESCE(a.goals, 0) AS goals,
+            COALESCE(a.assists, 0) AS assists,
+            COALESCE(a.yellow_cards, 0) AS yellow_cards,
+            COALESCE(a.red_cards, 0) AS red_cards,
+            COALESCE((
+                SELECT ROUND(AVG(v.rating)::numeric, 2)
+                FROM player_votes v
+                WHERE v.match_id=m.id
+                  AND v.voted_player_id=?
+            ), 0) AS media_voto
+        FROM appearances a
+        JOIN matches m ON m.id=a.match_id
+        WHERE a.player_id=?
+          AND m.match_date BETWEEN ? AND ?
+        ORDER BY m.match_date DESC, m.id DESC
+    """, (player_id, player_id, start_filter, end_filter), fetch=True)
+
+    if not rows:
+        cards = """
+        <div class="card">
+            Nessuna prestazione trovata per il periodo selezionato.
+        </div>
+        """
+    else:
+        cards = ""
+
+        for r in rows:
+            titolare = "Titolare" if int(r["starter"] or 0) == 1 else "Panchina/Subentrato"
+            cards += f"""
+            <div class="performance-card">
+                <div class="performance-title">{ui_date(r['match_date'])} · {r['opponent']}</div>
+                <div class="performance-meta">{r['competition']} · {r['home_away']} · Risultato: {r['result'] or '-'} · {titolare}</div>
+
+                <div class="performance-grid">
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['minutes']}</div>
+                        <div class="performance-label">Min</div>
+                    </div>
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['goals']}</div>
+                        <div class="performance-label">Gol</div>
+                    </div>
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['assists']}</div>
+                        <div class="performance-label">Assist</div>
+                    </div>
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['yellow_cards']}</div>
+                        <div class="performance-label">Gialli</div>
+                    </div>
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['red_cards']}</div>
+                        <div class="performance-label">Rossi</div>
+                    </div>
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['media_voto']}</div>
+                        <div class="performance-label">Voto</div>
+                    </div>
+                </div>
+            </div>
+            """
+
+    today = date.today().isoformat()
+
+    content = f"""
+    <div class="card">
+        <h2>Storico prestazioni</h2>
+        <div><b>{player['player_name']}</b></div>
+        <div class="small">{player['role'] or '-'}</div>
+
+        <form method="get">
+            <div class="inline">
+                <div>
+                    <label>Dal</label>
+                    <input type="date" name="start_date" value="{start_date}">
+                </div>
+                <div>
+                    <label>Al</label>
+                    <input type="date" name="end_date" value="{end_date or today}">
+                </div>
+            </div>
+            <button class="btn-blue">Filtra periodo</button>
+            <a class="btn btn-dark" href="/coach/player-stats/{player_id}">Azzera filtro</a>
+        </form>
+    </div>
+
+    {cards}
+
+    <a class="btn btn-blue" href="/coach/player-stats">Torna alle statistiche</a>
+    """
+
+    return page("Storico prestazioni", "Area allenatore", content)
 
 
 @app.route("/coach/matches", methods=["GET", "POST"])

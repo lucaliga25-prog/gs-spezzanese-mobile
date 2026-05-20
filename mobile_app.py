@@ -1,21 +1,20 @@
-from pathlib import Path
 import os
 import base64
 import psycopg2
 from psycopg2.pool import SimpleConnectionPool
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, execute_batch
 from dotenv import load_dotenv
 from datetime import date
 from functools import wraps
 
-from flask import Flask, request, redirect, url_for, session, render_template_string, flash, get_flashed_messages
+from flask import Flask, request, redirect, url_for, session, flash, get_flashed_messages
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL non trovata. Controlla il file .env.")
 
-DB_POOL = SimpleConnectionPool(1, 8, dsn=DATABASE_URL)
+DB_POOL = SimpleConnectionPool(1, int(os.getenv("DB_POOL_MAX", "16")), dsn=DATABASE_URL)
 
 
 COACH_PASSWORD = "spezzanese2627"
@@ -24,15 +23,19 @@ app = Flask(__name__)
 app.secret_key = "gestionale-gs-spezzanese-mobile-secret"
 
 
+def _pg(query):
+    """Converte i placeholder stile sqlite (?) in placeholder psycopg2 (%s)."""
+    return query.replace("?", "%s")
+
+
 def db_query(query, params=(), fetch=False):
-    """Query PostgreSQL veloce con connection pool. Mantiene compatibilità con i placeholder ?."""
-    pg_query = query.replace("?", "%s")
+    """Esegue una singola query usando il connection pool."""
     conn = DB_POOL.getconn()
     cur = None
 
     try:
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute(pg_query, params)
+        cur.execute(_pg(query), params)
         rows = cur.fetchall() if fetch else None
         conn.commit()
         return rows
@@ -43,6 +46,46 @@ def db_query(query, params=(), fetch=False):
         if cur is not None:
             cur.close()
         DB_POOL.putconn(conn)
+
+
+def db_transaction(statements=(), batches=()):
+    """
+    Esegue più comandi nello stesso round di connessione/commit.
+    statements: [(query, params), ...]
+    batches: [(query, [params, ...]), ...]
+    """
+    conn = DB_POOL.getconn()
+    cur = None
+
+    try:
+        cur = conn.cursor()
+        for query, params in statements:
+            cur.execute(_pg(query), params)
+        for query, rows in batches:
+            if rows:
+                execute_batch(cur, _pg(query), rows, page_size=200)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        if cur is not None:
+            cur.close()
+        DB_POOL.putconn(conn)
+
+
+_DB_READY = False
+
+def ensure_mobile_tables_once():
+    global _DB_READY
+    if not _DB_READY:
+        ensure_mobile_tables()
+        _DB_READY = True
+
+
+@app.before_request
+def _ensure_db_ready():
+    ensure_mobile_tables_once()
 
 
 def ensure_db():
@@ -374,7 +417,6 @@ def page(title, subtitle, content):
 
 @app.route("/", methods=["GET", "POST"])
 def home():
-    ensure_mobile_tables()
     if request.method == "POST":
         mode = request.form.get("mode")
         if mode == "player":
@@ -435,14 +477,6 @@ def player_home():
         encoded = base64.b64encode(data).decode("utf-8")
         mime = photo.mimetype or "image/jpeg"
 
-        # Sostituisce completamente la vecchia immagine profilo.
-        db_query("""
-            UPDATE players
-            SET photo_data='',
-                photo_mime=''
-            WHERE id=?
-        """, (voter_id,))
-
         db_query("""
             UPDATE players
             SET photo_data=?, photo_mime=?
@@ -476,10 +510,7 @@ def player_home():
 
 
 
-def vote_choices():
-    # Voti scolastici con + e -.
-    # Valore numerico usato per calcolare media:
-    # 6- = 5.75, 6 = 6.00, 6+ = 6.25, 6.5 = 6.50
+def _build_vote_choices():
     choices = []
     for base in range(4, 11):
         choices.append((f"{base}-", base - 0.25))
@@ -487,7 +518,14 @@ def vote_choices():
         choices.append((f"{base}+", base + 0.25))
         if base < 10:
             choices.append((f"{base}.5", base + 0.5))
-    return choices
+    return tuple(choices)
+
+
+VOTE_CHOICES = _build_vote_choices()
+
+
+def vote_choices():
+    return VOTE_CHOICES
 
 
 def parse_vote(value):
@@ -821,7 +859,7 @@ def player_votes(match_id):
             flash("Nessun giocatore votabile per questa partita.")
             return redirect(url_for("player_matches"))
 
-        saved = 0
+        vote_rows = []
 
         for row in rows:
             voted_id = row["id"]
@@ -831,19 +869,19 @@ def player_votes(match_id):
                 continue
 
             rating = parse_vote(raw)
-            if rating is None:
-                continue
+            if rating is not None:
+                vote_rows.append((match_id, voter_id, voted_id, rating))
 
-            db_query("""
-                INSERT INTO player_votes (match_id, voter_player_id, voted_player_id, rating)
-                VALUES (?, ?, ?, ?)
-            """, (match_id, voter_id, voted_id, rating))
-
-            saved += 1
+        saved = len(vote_rows)
 
         if saved == 0:
             flash("Inserisci almeno un voto prima di salvare.")
             return redirect(url_for("player_votes", match_id=match_id))
+
+        db_transaction(batches=[("""
+            INSERT INTO player_votes (match_id, voter_player_id, voted_player_id, rating)
+            VALUES (?, ?, ?, ?)
+        """, vote_rows)])
 
         flash(f"Voti salvati: {saved}. Non potrai più modificarli per questa partita.")
         return redirect(url_for("player_matches"))
@@ -1115,8 +1153,7 @@ def coach_formation():
     if request.method == "POST":
         match_id = int(request.form.get("match_id"))
         result = request.form.get("result", "").strip()
-        db_query("UPDATE matches SET result=? WHERE id=?", (result, match_id))
-        db_query("DELETE FROM appearances WHERE match_id=?", (match_id,))
+        appearance_rows = []
         for player in players:
             pid = player["id"]
             if not request.form.get(f"play_{pid}"):
@@ -1130,10 +1167,18 @@ def coach_formation():
                 minutes = goals = assists = 0
             yellow = 1 if request.form.get(f"yellow_{pid}") else 0
             red = 1 if request.form.get(f"red_{pid}") else 0
-            db_query("""
+            appearance_rows.append((match_id, pid, starter, minutes, goals, assists, yellow, red))
+
+        db_transaction(
+            statements=[
+                ("UPDATE matches SET result=? WHERE id=?", (result, match_id)),
+                ("DELETE FROM appearances WHERE match_id=?", (match_id,)),
+            ],
+            batches=[("""
                 INSERT INTO appearances (match_id,player_id,starter,minutes,goals,assists,yellow_cards,red_cards)
                 VALUES (?,?,?,?,?,?,?,?)
-            """, (match_id, pid, starter, minutes, goals, assists, yellow, red))
+            """, appearance_rows)],
+        )
         flash("Formazione salvata.")
         return redirect(url_for("coach_formation", match_id=match_id))
     existing = {}
@@ -1172,14 +1217,19 @@ def coach_training():
     selected_session_id = request.values.get("session_id") or (str(sessions[0]["id"]) if sessions else None)
     if request.method == "POST" and request.form.get("action") == "save_attendance":
         session_id = int(request.form.get("session_id"))
-        db_query("DELETE FROM training_attendance WHERE session_id=?", (session_id,))
+        attendance_rows = []
         for p in players:
             pid = p["id"]
             try:
                 status_int = int(request.form.get(f"status_{pid}", "0"))
             except ValueError:
                 status_int = 0
-            db_query("INSERT INTO training_attendance (session_id,player_id,present) VALUES (?,?,?)", (session_id, pid, status_int))
+            attendance_rows.append((session_id, pid, status_int))
+
+        db_transaction(
+            statements=[("DELETE FROM training_attendance WHERE session_id=?", (session_id,))],
+            batches=[("INSERT INTO training_attendance (session_id,player_id,present) VALUES (?,?,?)", attendance_rows)],
+        )
         flash("Presenze salvate.")
         return redirect(url_for("coach_training", session_id=session_id))
     existing = {}

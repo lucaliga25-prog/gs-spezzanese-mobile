@@ -122,6 +122,16 @@ def ensure_db():
                 )
             """)
 
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS coach_votes (
+                    id INTEGER PRIMARY KEY,
+                    match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+                    voted_player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+                    rating NUMERIC(4,2) NOT NULL,
+                    UNIQUE(match_id, voted_player_id)
+                )
+            """)
+
             cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS photo_data TEXT DEFAULT ''")
             cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS photo_mime TEXT DEFAULT ''")
             cur.execute("ALTER TABLE player_votes ALTER COLUMN rating TYPE NUMERIC(4,2) USING rating::numeric")
@@ -131,10 +141,11 @@ def ensure_db():
             cur.execute("CREATE INDEX IF NOT EXISTS idx_matches_date ON matches(match_date)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_votes_voted_match ON player_votes(voted_player_id, match_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_votes_voter_match ON player_votes(voter_player_id, match_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_coach_votes_voted_match ON coach_votes(voted_player_id, match_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_training_attendance_player_session ON training_attendance(player_id, session_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_training_sessions_date ON training_sessions(training_date)")
 
-            for table in ["players", "matches", "appearances", "substitutions", "training_sessions", "training_attendance", "player_votes"]:
+            for table in ["players", "matches", "appearances", "substitutions", "training_sessions", "training_attendance", "player_votes", "coach_votes"]:
                 seq = f"{table}_id_seq"
                 cur.execute(f"CREATE SEQUENCE IF NOT EXISTS {seq}")
                 cur.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table}")
@@ -519,10 +530,20 @@ def player_card():
             COUNT(a.id) AS presenze,
             COALESCE(SUM(a.goals), 0) AS gol,
             COALESCE(SUM(a.assists), 0) AS assist,
-            COALESCE(ROUND(AVG(v.rating)::numeric, 2), 0) AS media_voto
+            COALESCE((
+                SELECT ROUND(AVG(x.rating)::numeric, 2)
+                FROM (
+                    SELECT pv.rating
+                    FROM player_votes pv
+                    WHERE pv.voted_player_id=p.id
+                    UNION ALL
+                    SELECT cv.rating
+                    FROM coach_votes cv
+                    WHERE cv.voted_player_id=p.id
+                ) x
+            ), 0) AS media_voto
         FROM players p
         LEFT JOIN appearances a ON a.player_id=p.id
-        LEFT JOIN player_votes v ON v.voted_player_id=p.id
         WHERE p.id=?
         GROUP BY p.id, p.first_name, p.last_name, p.role, p.photo_data, p.photo_mime
     """, (player_id,), fetch=True)
@@ -605,14 +626,21 @@ def player_history():
                 match_id,
                 voted_player_id,
                 ROUND(AVG(rating)::numeric, 2) AS media_voto
-            FROM player_votes
-            WHERE voted_player_id=?
+            FROM (
+                SELECT match_id, voted_player_id, rating
+                FROM player_votes
+                WHERE voted_player_id=?
+                UNION ALL
+                SELECT match_id, voted_player_id, rating
+                FROM coach_votes
+                WHERE voted_player_id=?
+            ) all_votes
             GROUP BY match_id, voted_player_id
         ) v ON v.match_id=m.id AND v.voted_player_id=a.player_id
         WHERE a.player_id=?
           AND m.match_date BETWEEN ? AND ?
         ORDER BY m.match_date DESC, m.id DESC
-    """, (player_id, player_id, start_filter, end_filter), fetch=True)
+    """, (player_id, player_id, player_id, start_filter, end_filter), fetch=True)
 
     if not rows:
         cards = """
@@ -902,10 +930,182 @@ def player_votes(match_id):
 @login_required("coach")
 def coach_panel():
     content = """
-    <div class="card"><h2>Pannello allenatore</h2><div class="tabs"><a class="btn btn-blue" href="/coach/matches">Partite</a><a class="btn btn-green" href="/coach/formation">Formazione</a><a class="btn btn-dark" href="/coach/training">Allenamenti</a><a class="btn btn-blue" href="/coach/player-stats">Statistiche giocatori</a><a class="btn" href="/logout">Esci</a></div></div>
+    <div class="card"><h2>Pannello allenatore</h2><div class="tabs"><a class="btn btn-blue" href="/coach/matches">Partite</a><a class="btn btn-green" href="/coach/formation">Formazione</a><a class="btn btn-dark" href="/coach/training">Allenamenti</a><a class="btn btn-blue" href="/coach/player-stats">Statistiche giocatori</a><a class="btn btn-green" href="/coach/votes">Voti allenatore</a><a class="btn" href="/logout">Esci</a></div></div>
     """
     return page("Allenatore", "Gestione rapida da telefono", content)
 
+
+
+
+@app.route("/coach/votes")
+@login_required("coach")
+def coach_votes_matches():
+    matches = db_query("""
+        SELECT
+            m.id,
+            m.match_date,
+            m.opponent,
+            m.competition,
+            m.home_away,
+            COALESCE(m.result, '') AS result,
+            COUNT(a.id) AS players_over_10,
+            CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM coach_votes cv
+                    WHERE cv.match_id=m.id
+                )
+                THEN 1 ELSE 0
+            END AS already_voted
+        FROM matches m
+        JOIN appearances a ON a.match_id=m.id
+        WHERE COALESCE(a.minutes, 0) > 10
+        GROUP BY m.id, m.match_date, m.opponent, m.competition, m.home_away, m.result
+        ORDER BY m.match_date DESC, m.id DESC
+    """, fetch=True)
+
+    if not matches:
+        content = """
+        <div class="card">
+            <h2>Nessuna partita votabile</h2>
+            <div>Non ci sono ancora partite con giocatori sopra i 10 minuti.</div>
+        </div>
+        <a class="btn btn-blue" href="/coach">Indietro</a>
+        """
+        return page("Voti allenatore", "Area allenatore", content)
+
+    items = ""
+    for m in matches:
+        stato = "Già votata/modificabile" if int(m["already_voted"] or 0) == 1 else "Da votare"
+        items += f"""
+        <div class="player-row">
+            <div class="player-title">{ui_date(m['match_date'])} · {m['opponent']}</div>
+            <div class="small">{m['competition']} · {m['home_away']} · Risultato: {m['result'] or '-'} · Giocatori votabili: {m['players_over_10']} · {stato}</div>
+            <a class="btn btn-green" href="/coach/votes/{m['id']}">Apri voti</a>
+        </div>
+        """
+
+    content = f"""
+    <div class="card">
+        <h2>Scegli partita da votare</h2>
+        <div class="small">L'allenatore può inserire o modificare i propri voti. I voti entreranno nella media generale.</div>
+        {items}
+    </div>
+    <a class="btn btn-blue" href="/coach">Indietro</a>
+    """
+    return page("Voti allenatore", "Area allenatore", content)
+
+
+@app.route("/coach/votes/<int:match_id>", methods=["GET", "POST"])
+@login_required("coach")
+def coach_votes_match(match_id):
+    match_rows = db_query("""
+        SELECT id, match_date, opponent, competition, home_away, COALESCE(result, '') AS result
+        FROM matches
+        WHERE id=?
+    """, (match_id,), fetch=True)
+
+    if not match_rows:
+        flash("Partita non trovata.")
+        return redirect(url_for("coach_votes_matches"))
+
+    match = match_rows[0]
+
+    players = db_query("""
+        SELECT
+            p.id,
+            p.first_name,
+            p.last_name,
+            p.role,
+            a.minutes
+        FROM appearances a
+        JOIN players p ON p.id=a.player_id
+        WHERE a.match_id=?
+          AND COALESCE(a.minutes, 0) > 10
+        ORDER BY p.last_name, p.first_name
+    """, (match_id,), fetch=True)
+
+    if request.method == "POST":
+        saved = 0
+
+        for row in players:
+            voted_id = row["id"]
+            raw = request.form.get(f"rating_{voted_id}", "")
+
+            if raw == "":
+                db_query("""
+                    DELETE FROM coach_votes
+                    WHERE match_id=? AND voted_player_id=?
+                """, (match_id, voted_id))
+                continue
+
+            rating = parse_vote(raw)
+            if rating is None:
+                continue
+
+            db_query("""
+                INSERT INTO coach_votes (match_id, voted_player_id, rating)
+                VALUES (?, ?, ?)
+                ON CONFLICT(match_id, voted_player_id)
+                DO UPDATE SET rating=excluded.rating
+            """, (match_id, voted_id, rating))
+
+            saved += 1
+
+        flash(f"Voti allenatore salvati: {saved}.")
+        return redirect(url_for("coach_votes_match", match_id=match_id))
+
+    existing = db_query("""
+        SELECT voted_player_id, rating
+        FROM coach_votes
+        WHERE match_id=?
+    """, (match_id,), fetch=True)
+    existing_map = {r["voted_player_id"]: float(r["rating"]) for r in existing}
+
+    if not players:
+        items = "<div class='player-row'>Nessun giocatore ha superato i 10 minuti in questa partita.</div>"
+    else:
+        items = ""
+        for row in players:
+            selected = existing_map.get(row["id"], "")
+
+            options = "<option value=''>--</option>"
+            for label, value in vote_choices():
+                sel = "selected" if selected != "" and abs(float(selected) - float(value)) < 0.001 else ""
+                options += f"<option value='{value}' {sel}>{label}</option>"
+
+            items += f"""
+            <div class="player-row">
+                <div class="row">
+                    <div>
+                        <div class="player-title">{player_name(row)}</div>
+                        <div class="small">{row['role'] or '-'} · {row['minutes']} minuti</div>
+                    </div>
+                    <select name="rating_{row['id']}">
+                        {options}
+                    </select>
+                </div>
+            </div>
+            """
+
+    content = f"""
+    <div class="card">
+        <h2>Voti allenatore</h2>
+        <div><b>{ui_date(match['match_date'])}</b> vs {match['opponent']}</div>
+        <div class="small">{match['competition']} · {match['home_away']} · Risultato: {match['result'] or '-'}</div>
+        <div class="small">Puoi votare solo i giocatori che hanno fatto più di 10 minuti.</div>
+    </div>
+
+    <div class="card">
+        <form method="post">
+            {items}
+            <button>Salva voti allenatore</button>
+        </form>
+        <a class="btn btn-blue" href="/coach/votes">Torna alle partite</a>
+    </div>
+    """
+
+    return page("Voti allenatore", "Area allenatore", content)
 
 
 @app.route("/coach/player-stats")
@@ -988,12 +1188,18 @@ def coach_player_stats():
 
         LEFT JOIN (
             SELECT
-                v.voted_player_id AS player_id,
-                ROUND(AVG(v.rating)::numeric, 2) AS media_voto
-            FROM player_votes v
-            JOIN matches m ON m.id=v.match_id
+                all_votes.player_id,
+                ROUND(AVG(all_votes.rating)::numeric, 2) AS media_voto
+            FROM (
+                SELECT v.voted_player_id AS player_id, v.match_id, v.rating
+                FROM player_votes v
+                UNION ALL
+                SELECT cv.voted_player_id AS player_id, cv.match_id, cv.rating
+                FROM coach_votes cv
+            ) all_votes
+            JOIN matches m ON m.id=all_votes.match_id
             WHERE m.match_date BETWEEN ? AND ?
-            GROUP BY v.voted_player_id
+            GROUP BY all_votes.player_id
         ) vt ON vt.player_id=p.id
 
         ORDER BY COALESCE(ms.minuti,0) DESC, p.last_name, p.first_name

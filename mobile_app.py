@@ -157,12 +157,39 @@ def get_players():
 
 
 def last_match():
+    # Per i voti deve prendere l'ultima partita con almeno un giocatore sopra i 10 minuti,
+    # non semplicemente l'ultima partita creata.
+    rows = db_query("""
+        SELECT
+            m.id,
+            m.match_date,
+            m.opponent,
+            m.competition,
+            m.home_away,
+            m.result
+        FROM matches m
+        WHERE EXISTS (
+            SELECT 1
+            FROM appearances a
+            WHERE a.match_id = m.id
+              AND COALESCE(a.minutes, 0) > 10
+        )
+        ORDER BY m.match_date DESC, m.id DESC
+        LIMIT 1
+    """, fetch=True)
+
+    if rows:
+        return rows[0]
+
+    # Fallback: se non esiste ancora nessuna formazione salvata,
+    # mostra comunque l'ultima partita inserita.
     rows = db_query("""
         SELECT id, match_date, opponent, competition, home_away, result
         FROM matches
         ORDER BY match_date DESC, id DESC
         LIMIT 1
     """, fetch=True)
+
     return rows[0] if rows else None
 
 
@@ -280,7 +307,7 @@ def player_home():
 
     <div class="card">
         <h2>Voti partita</h2>
-        <a class="btn btn-blue" href="/player/votes">Vai ai voti dell'ultima partita</a>
+        <a class="btn btn-blue" href="/player/matches">Scegli partita da votare</a>
         <a class="btn" href="/logout">Esci</a>
     </div>
     """
@@ -288,19 +315,116 @@ def player_home():
     return page("Area giocatore", f"Ciao {session.get('player_name')}", content)
 
 
-@app.route("/player/votes", methods=["GET", "POST"])
+@app.route("/player/matches")
 @login_required("player")
-def player_votes():
-    match = last_match()
+def player_matches():
+    voter_id = session["player_id"]
 
-    if not match:
-        return page(
-            "Voti giocatore",
-            "Nessuna partita trovata",
-            "<div class='card'>Non ci sono partite inserite.</div><a class='btn btn-blue' href='/player'>Torna all'area giocatore</a>"
-        )
+    matches = db_query("""
+        SELECT
+            m.id,
+            m.match_date,
+            m.opponent,
+            m.competition,
+            m.home_away,
+            COALESCE(m.result, '') AS result,
+            COUNT(a.id) AS players_over_10,
+            CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM player_votes pv
+                    WHERE pv.match_id=m.id
+                      AND pv.voter_player_id=?
+                )
+                THEN 1 ELSE 0
+            END AS already_voted
+        FROM matches m
+        JOIN appearances a ON a.match_id=m.id
+        WHERE COALESCE(a.minutes, 0) > 10
+        GROUP BY m.id, m.match_date, m.opponent, m.competition, m.home_away, m.result
+        ORDER BY m.match_date DESC, m.id DESC
+    """, (voter_id,), fetch=True)
 
-    # Mostra solo chi ha giocato più di 10 minuti nell'ultima partita
+    if not matches:
+        content = """
+        <div class="card">
+            <h2>Nessuna partita votabile</h2>
+            <div>Non ci sono ancora partite con giocatori sopra i 10 minuti.</div>
+        </div>
+        <a class="btn btn-blue" href="/player">Area giocatore</a>
+        """
+        return page("Scegli partita", "Voti giocatore", content)
+
+    items = ""
+
+    for m in matches:
+        voted = int(m["already_voted"] or 0) == 1
+
+        if voted:
+            action = "<button disabled style='background:#94a3b8'>Già votata</button>"
+        else:
+            action = f"<a class='btn btn-green' href='/player/votes/{m['id']}'>Vota questa partita</a>"
+
+        items += f"""
+        <div class="player-row">
+            <div class="player-title">{ui_date(m['match_date'])} · {m['opponent']}</div>
+            <div class="small">{m['competition']} · {m['home_away']} · Risultato: {m['result'] or '-'} · Giocatori votabili: {m['players_over_10']}</div>
+            {action}
+        </div>
+        """
+
+    content = f"""
+    <div class="card">
+        <h2>Scegli partita da votare</h2>
+        {items}
+    </div>
+    <a class="btn btn-blue" href="/player">Area giocatore</a>
+    """
+
+    return page("Scegli partita", f"Ciao {session.get('player_name')}", content)
+
+
+@app.route("/player/votes")
+@login_required("player")
+def player_votes_redirect():
+    return redirect(url_for("player_matches"))
+
+
+@app.route("/player/votes/<int:match_id>", methods=["GET", "POST"])
+@login_required("player")
+def player_votes(match_id):
+    voter_id = session["player_id"]
+
+    match_rows = db_query("""
+        SELECT id, match_date, opponent, competition, home_away, COALESCE(result, '') AS result
+        FROM matches
+        WHERE id=?
+    """, (match_id,), fetch=True)
+
+    if not match_rows:
+        flash("Partita non trovata.")
+        return redirect(url_for("player_matches"))
+
+    match = match_rows[0]
+
+    already_voted = db_query("""
+        SELECT COUNT(*)
+        FROM player_votes
+        WHERE match_id=? AND voter_player_id=?
+    """, (match_id, voter_id), fetch=True)[0][0]
+
+    if already_voted:
+        content = f"""
+        <div class="card">
+            <h2>Partita già votata</h2>
+            <div>Hai già inserito i voti per:</div>
+            <div><b>{ui_date(match['match_date'])}</b> vs {match['opponent']}</div>
+            <div class="small">{match['competition']} · {match['home_away']} · Risultato: {match['result'] or '-'}</div>
+        </div>
+        <a class="btn btn-blue" href="/player/matches">Torna alle partite</a>
+        """
+        return page("Voti già inseriti", f"Ciao {session.get('player_name')}", content)
+
     rows = db_query("""
         SELECT
             p.id,
@@ -311,13 +435,15 @@ def player_votes():
         FROM appearances a
         JOIN players p ON p.id=a.player_id
         WHERE a.match_id=?
-          AND a.minutes > 10
+          AND COALESCE(a.minutes, 0) > 10
         ORDER BY p.last_name, p.first_name
-    """, (match["id"],), fetch=True)
-
-    voter_id = session["player_id"]
+    """, (match_id,), fetch=True)
 
     if request.method == "POST":
+        if not rows:
+            flash("Nessun giocatore votabile per questa partita.")
+            return redirect(url_for("player_matches"))
+
         saved = 0
 
         for row in rows:
@@ -338,39 +464,30 @@ def player_votes():
             db_query("""
                 INSERT INTO player_votes (match_id, voter_player_id, voted_player_id, rating)
                 VALUES (?, ?, ?, ?)
-                ON CONFLICT(match_id, voter_player_id, voted_player_id)
-                DO UPDATE SET rating=excluded.rating
-            """, (match["id"], voter_id, voted_id, rating))
+            """, (match_id, voter_id, voted_id, rating))
 
             saved += 1
 
-        flash(f"Voti salvati: {saved}.")
-        return redirect(url_for("player_votes"))
+        if saved == 0:
+            flash("Inserisci almeno un voto prima di salvare.")
+            return redirect(url_for("player_votes", match_id=match_id))
 
-    existing = db_query("""
-        SELECT voted_player_id, rating
-        FROM player_votes
-        WHERE match_id=? AND voter_player_id=?
-    """, (match["id"], voter_id), fetch=True)
-
-    existing_map = {r["voted_player_id"]: r["rating"] for r in existing}
+        flash(f"Voti salvati: {saved}. Non potrai più modificarli per questa partita.")
+        return redirect(url_for("player_matches"))
 
     if not rows:
         items = """
         <div class="player-row">
-            Nessun giocatore ha superato i 10 minuti nell'ultima partita.
+            Nessun giocatore ha superato i 10 minuti in questa partita.
         </div>
         """
     else:
         items = ""
 
         for row in rows:
-            selected = existing_map.get(row["id"], "")
-
             options = "<option value=''>--</option>"
             for i in range(1, 11):
-                sel = "selected" if selected == i else ""
-                options += f"<option value='{i}' {sel}>{i}</option>"
+                options += f"<option value='{i}'>{i}</option>"
 
             items += f"""
             <div class="player-row">
@@ -388,20 +505,20 @@ def player_votes():
 
     content = f"""
     <div class="card">
-        <h2>Ultima partita</h2>
+        <h2>Partita selezionata</h2>
         <div><b>{ui_date(match['match_date'])}</b> vs {match['opponent']}</div>
         <div class="small">{match['competition']} · {match['home_away']} · Risultato: {match['result'] or '-'}</div>
         <div class="small">Puoi votare solo i giocatori che hanno fatto più di 10 minuti.</div>
+        <div class="small"><b>Attenzione:</b> dopo il salvataggio non potrai più modificare i voti di questa partita.</div>
     </div>
 
     <div class="card">
         <h2>Inserisci voti</h2>
         <form method="post">
             {items}
-            <button>Salva voti</button>
+            <button>Salva voti definitivamente</button>
         </form>
-        <a class="btn btn-blue" href="/player">Area giocatore</a>
-        <a class="btn" href="/logout">Esci</a>
+        <a class="btn btn-blue" href="/player/matches">Torna alle partite</a>
     </div>
     """
 

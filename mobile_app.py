@@ -215,7 +215,7 @@ def home():
             session["role"] = "player"
             session["player_id"] = player[0]["id"]
             session["player_name"] = f"{player[0]['last_name']} {player[0]['first_name']}"
-            return redirect(url_for("player_votes"))
+            return redirect(url_for("player_home"))
         if mode == "coach":
             if request.form.get("password", "") != COACH_PASSWORD:
                 flash("Password allenatore errata.")
@@ -236,83 +236,175 @@ def logout():
     return redirect(url_for("home"))
 
 
-@app.route("/player/votes", methods=["GET", "POST"])
+
+@app.route("/player", methods=["GET", "POST"])
 @login_required("player")
-def player_votes():
-    match = last_match()
-    if not match:
-        return page("Voti giocatore", "Nessuna partita trovata", "<div class='card'>Non ci sono partite inserite.</div>")
-    rows = db_query("""
-        SELECT p.id,p.first_name,p.last_name,p.role,a.minutes
-        FROM appearances a JOIN players p ON p.id=a.player_id
-        WHERE a.match_id=? AND a.minutes > 0
-        ORDER BY p.last_name,p.first_name
-    """, (match["id"],), fetch=True)
+def player_home():
     voter_id = session["player_id"]
+
     if request.method == "POST":
-        if request.form.get("action") == "upload_photo":
-            photo = request.files.get("photo")
-            if not photo or not photo.filename:
-                flash("Seleziona una foto prima di salvare.")
-                return redirect(url_for("player_votes"))
+        photo = request.files.get("photo")
 
-            data = photo.read()
-            if len(data) > 2 * 1024 * 1024:
-                flash("Foto troppo grande. Usa una foto sotto i 2 MB.")
-                return redirect(url_for("player_votes"))
+        if not photo or not photo.filename:
+            flash("Seleziona una foto prima di salvare.")
+            return redirect(url_for("player_home"))
 
-            encoded = base64.b64encode(data).decode("utf-8")
-            mime = photo.mimetype or "image/jpeg"
+        data = photo.read()
 
-            db_query("""
-                UPDATE players
-                SET photo_data=?, photo_mime=?
-                WHERE id=?
-            """, (encoded, mime, voter_id))
+        if len(data) > 2 * 1024 * 1024:
+            flash("Foto troppo grande. Usa una foto sotto i 2 MB.")
+            return redirect(url_for("player_home"))
 
-            flash("Foto profilo salvata correttamente.")
-            return redirect(url_for("player_votes"))
+        encoded = base64.b64encode(data).decode("utf-8")
+        mime = photo.mimetype or "image/jpeg"
 
-        for row in rows:
-            voted_id = row["id"]
-            raw = request.form.get(f"rating_{voted_id}", "")
-            if raw == "":
-                continue
-            try:
-                rating = int(raw)
-            except ValueError:
-                continue
-            if 1 <= rating <= 10:
-                db_query("""
-                    INSERT INTO player_votes (match_id,voter_player_id,voted_player_id,rating)
-                    VALUES (?,?,?,?)
-                    ON CONFLICT(match_id,voter_player_id,voted_player_id) DO UPDATE SET rating=excluded.rating
-                """, (match["id"], voter_id, voted_id, rating))
-        flash("Voti salvati correttamente.")
-        return redirect(url_for("player_votes"))
-    existing = db_query("SELECT voted_player_id,rating FROM player_votes WHERE match_id=? AND voter_player_id=?", (match["id"], voter_id), fetch=True)
-    existing_map = {r["voted_player_id"]: r["rating"] for r in existing}
-    items = ""
-    for row in rows:
-        selected = existing_map.get(row["id"], "")
-        options = "<option value=''>--</option>" + "".join(f"<option value='{i}' {'selected' if selected == i else ''}>{i}</option>" for i in range(1, 11))
-        items += f"<div class='player-row'><div class='row'><div><div class='player-title'>{player_name(row)}</div><div class='small'>{row['role'] or '-'} · {row['minutes']} minuti</div></div><select name='rating_{row['id']}'>{options}</select></div></div>"
-    content = f"""
-    <div class="card"><h2>Ultima partita</h2><div><b>{ui_date(match['match_date'])}</b> vs {match['opponent']}</div><div class="small">{match['competition']} · {match['home_away']} · Risultato: {match['result'] or '-'}</div></div>
+        db_query("""
+            UPDATE players
+            SET photo_data=?, photo_mime=?
+            WHERE id=?
+        """, (encoded, mime, voter_id))
 
+        flash("Foto figurina salvata correttamente.")
+        return redirect(url_for("player_home"))
+
+    content = """
     <div class="card">
         <h2>Foto figurina</h2>
         <form method="post" enctype="multipart/form-data">
-            <input type="hidden" name="action" value="upload_photo">
             <label>Carica foto profilo</label>
             <input type="file" name="photo" accept="image/*" required>
             <button class="btn-green">Salva foto</button>
         </form>
-        <div class="small">La foto verrà mostrata nella pagina Figurine del gestionale.</div>
+        <div class="small">La foto verrà mostrata nella pagina Figurine del gestionale PC.</div>
     </div>
 
-    <div class="card"><h2>Inserisci voti</h2><form method="post">{items}<button>Salva voti</button></form><a class="btn btn-blue" href="/logout">Esci</a></div>
+    <div class="card">
+        <h2>Voti partita</h2>
+        <a class="btn btn-blue" href="/player/votes">Vai ai voti dell'ultima partita</a>
+        <a class="btn" href="/logout">Esci</a>
+    </div>
     """
+
+    return page("Area giocatore", f"Ciao {session.get('player_name')}", content)
+
+
+@app.route("/player/votes", methods=["GET", "POST"])
+@login_required("player")
+def player_votes():
+    match = last_match()
+
+    if not match:
+        return page(
+            "Voti giocatore",
+            "Nessuna partita trovata",
+            "<div class='card'>Non ci sono partite inserite.</div><a class='btn btn-blue' href='/player'>Torna all'area giocatore</a>"
+        )
+
+    # Mostra solo chi ha giocato più di 10 minuti nell'ultima partita
+    rows = db_query("""
+        SELECT
+            p.id,
+            p.first_name,
+            p.last_name,
+            p.role,
+            a.minutes
+        FROM appearances a
+        JOIN players p ON p.id=a.player_id
+        WHERE a.match_id=?
+          AND a.minutes > 10
+        ORDER BY p.last_name, p.first_name
+    """, (match["id"],), fetch=True)
+
+    voter_id = session["player_id"]
+
+    if request.method == "POST":
+        saved = 0
+
+        for row in rows:
+            voted_id = row["id"]
+            raw = request.form.get(f"rating_{voted_id}", "")
+
+            if raw == "":
+                continue
+
+            try:
+                rating = int(raw)
+            except ValueError:
+                continue
+
+            if rating < 1 or rating > 10:
+                continue
+
+            db_query("""
+                INSERT INTO player_votes (match_id, voter_player_id, voted_player_id, rating)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(match_id, voter_player_id, voted_player_id)
+                DO UPDATE SET rating=excluded.rating
+            """, (match["id"], voter_id, voted_id, rating))
+
+            saved += 1
+
+        flash(f"Voti salvati: {saved}.")
+        return redirect(url_for("player_votes"))
+
+    existing = db_query("""
+        SELECT voted_player_id, rating
+        FROM player_votes
+        WHERE match_id=? AND voter_player_id=?
+    """, (match["id"], voter_id), fetch=True)
+
+    existing_map = {r["voted_player_id"]: r["rating"] for r in existing}
+
+    if not rows:
+        items = """
+        <div class="player-row">
+            Nessun giocatore ha superato i 10 minuti nell'ultima partita.
+        </div>
+        """
+    else:
+        items = ""
+
+        for row in rows:
+            selected = existing_map.get(row["id"], "")
+
+            options = "<option value=''>--</option>"
+            for i in range(1, 11):
+                sel = "selected" if selected == i else ""
+                options += f"<option value='{i}' {sel}>{i}</option>"
+
+            items += f"""
+            <div class="player-row">
+                <div class="row">
+                    <div>
+                        <div class="player-title">{player_name(row)}</div>
+                        <div class="small">{row['role'] or '-'} · {row['minutes']} minuti</div>
+                    </div>
+                    <select name="rating_{row['id']}">
+                        {options}
+                    </select>
+                </div>
+            </div>
+            """
+
+    content = f"""
+    <div class="card">
+        <h2>Ultima partita</h2>
+        <div><b>{ui_date(match['match_date'])}</b> vs {match['opponent']}</div>
+        <div class="small">{match['competition']} · {match['home_away']} · Risultato: {match['result'] or '-'}</div>
+        <div class="small">Puoi votare solo i giocatori che hanno fatto più di 10 minuti.</div>
+    </div>
+
+    <div class="card">
+        <h2>Inserisci voti</h2>
+        <form method="post">
+            {items}
+            <button>Salva voti</button>
+        </form>
+        <a class="btn btn-blue" href="/player">Area giocatore</a>
+        <a class="btn" href="/logout">Esci</a>
+    </div>
+    """
+
     return page("Voti giocatore", f"Ciao {session.get('player_name')}", content)
 
 

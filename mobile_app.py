@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import base64
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
@@ -114,6 +115,9 @@ def ensure_db():
                     UNIQUE(match_id, voter_player_id, voted_player_id)
                 )
             """)
+
+            cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS photo_data TEXT DEFAULT ''")
+            cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS photo_mime TEXT DEFAULT ''")
 
             for table in ["players", "matches", "appearances", "substitutions", "training_sessions", "training_attendance", "player_votes"]:
                 seq = f"{table}_id_seq"
@@ -246,6 +250,29 @@ def player_votes():
     """, (match["id"],), fetch=True)
     voter_id = session["player_id"]
     if request.method == "POST":
+        if request.form.get("action") == "upload_photo":
+            photo = request.files.get("photo")
+            if not photo or not photo.filename:
+                flash("Seleziona una foto prima di salvare.")
+                return redirect(url_for("player_votes"))
+
+            data = photo.read()
+            if len(data) > 2 * 1024 * 1024:
+                flash("Foto troppo grande. Usa una foto sotto i 2 MB.")
+                return redirect(url_for("player_votes"))
+
+            encoded = base64.b64encode(data).decode("utf-8")
+            mime = photo.mimetype or "image/jpeg"
+
+            db_query("""
+                UPDATE players
+                SET photo_data=?, photo_mime=?
+                WHERE id=?
+            """, (encoded, mime, voter_id))
+
+            flash("Foto profilo salvata correttamente.")
+            return redirect(url_for("player_votes"))
+
         for row in rows:
             voted_id = row["id"]
             raw = request.form.get(f"rating_{voted_id}", "")
@@ -272,6 +299,18 @@ def player_votes():
         items += f"<div class='player-row'><div class='row'><div><div class='player-title'>{player_name(row)}</div><div class='small'>{row['role'] or '-'} · {row['minutes']} minuti</div></div><select name='rating_{row['id']}'>{options}</select></div></div>"
     content = f"""
     <div class="card"><h2>Ultima partita</h2><div><b>{ui_date(match['match_date'])}</b> vs {match['opponent']}</div><div class="small">{match['competition']} · {match['home_away']} · Risultato: {match['result'] or '-'}</div></div>
+
+    <div class="card">
+        <h2>Foto figurina</h2>
+        <form method="post" enctype="multipart/form-data">
+            <input type="hidden" name="action" value="upload_photo">
+            <label>Carica foto profilo</label>
+            <input type="file" name="photo" accept="image/*" required>
+            <button class="btn-green">Salva foto</button>
+        </form>
+        <div class="small">La foto verrà mostrata nella pagina Figurine del gestionale.</div>
+    </div>
+
     <div class="card"><h2>Inserisci voti</h2><form method="post">{items}<button>Salva voti</button></form><a class="btn btn-blue" href="/logout">Esci</a></div>
     """
     return page("Voti giocatore", f"Ciao {session.get('player_name')}", content)

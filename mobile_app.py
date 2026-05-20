@@ -1,15 +1,12 @@
 from pathlib import Path
 import os
-import time
 import base64
-from io import BytesIO
 import psycopg2
 from psycopg2.pool import SimpleConnectionPool
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from datetime import date
-from functools import wraps, lru_cache
-from PIL import Image, ImageOps
+from functools import wraps
 
 from flask import Flask, request, redirect, url_for, session, render_template_string, flash, get_flashed_messages
 
@@ -18,24 +15,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL non trovata. Controlla il file .env.")
 
-DB_POOL = SimpleConnectionPool(1, 3, dsn=DATABASE_URL)
+DB_POOL = SimpleConnectionPool(1, 8, dsn=DATABASE_URL)
 
 
-
-
-# Cache leggera per non ricalcolare MOTW/MOTM ad ogni apertura figurina.
-MOT_CACHE = {
-    "expires_at": 0,
-    "motw_id": None,
-    "motm_id": None,
-}
-
-
-PLAYER_CARD_CACHE = {}
-PLAYER_CARD_CACHE_TTL = 300
-
-PLAYER_HISTORY_CACHE = {}
-PLAYER_HISTORY_CACHE_TTL = 180
 COACH_PASSWORD = "spezzanese2627"
 
 app = Flask(__name__)
@@ -143,19 +125,12 @@ def ensure_db():
             cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS photo_data TEXT DEFAULT ''")
             cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS photo_mime TEXT DEFAULT ''")
             cur.execute("ALTER TABLE player_votes ALTER COLUMN rating TYPE NUMERIC(4,2) USING rating::numeric")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_player_votes_voted_match_rating ON player_votes(voted_player_id, match_id, rating)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_player_votes_match_voted_rating ON player_votes(match_id, voted_player_id, rating)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_appearances_player_match_fast ON appearances(player_id, match_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_matches_match_date_id_fast ON matches(match_date, id)")
-
 
             cur.execute("CREATE INDEX IF NOT EXISTS idx_appearances_player_match ON appearances(player_id, match_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_appearances_match ON appearances(match_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_matches_date ON matches(match_date)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_votes_voted_match ON player_votes(voted_player_id, match_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_votes_voter_match ON player_votes(voter_player_id, match_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_player_votes_match_voted_rating ON player_votes(match_id, voted_player_id, rating)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_matches_date_id ON matches(match_date, id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_training_attendance_player_session ON training_attendance(player_id, session_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_training_sessions_date ON training_sessions(training_date)")
 
@@ -385,61 +360,6 @@ BASE_STYLE = """
     font-size:12px;
     border-radius:10px;
 }
-.special-card-motw{
-    background:linear-gradient(135deg,#020617,#111827,#000000);
-    border:3px solid #facc15;
-    box-shadow:0 14px 32px rgba(250,204,21,.32);
-    color:#fde68a;
-}
-.special-card-motm{
-    background:linear-gradient(135deg,#991b1b,#1d4ed8,#7f1d1d);
-    border:3px solid #60a5fa;
-    box-shadow:0 14px 32px rgba(37,99,235,.32);
-    color:#eff6ff;
-}
-.special-badge{
-    display:inline-block;
-    padding:8px 16px;
-    border-radius:999px;
-    font-size:18px;
-    font-weight:900;
-    margin-bottom:10px;
-    letter-spacing:.5px;
-}
-.special-badge-motw{
-    color:#facc15;
-    background:#111827;
-    border:2px solid #facc15;
-}
-.special-badge-motm{
-    color:#dbeafe;
-    background:#7f1d1d;
-    border:2px solid #93c5fd;
-}
-.special-card-motw .card-name,
-.special-card-motw .stat-value{
-    color:#facc15;
-}
-.special-card-motw .card-role,
-.special-card-motw .stat-label{
-    color:#fde68a;
-}
-.special-card-motm .card-name,
-.special-card-motm .stat-value{
-    color:#eff6ff;
-}
-.special-card-motm .card-role,
-.special-card-motm .stat-label{
-    color:#bfdbfe;
-}
-.special-card-motw .stat-box{
-    background:#1a1a1a;
-    border-color:#facc15;
-}
-.special-card-motm .stat-box{
-    background:#1e3a8a;
-    border-color:#93c5fd;
-}
 </style>
 """
 
@@ -529,7 +449,6 @@ def player_home():
             WHERE id=?
         """, (encoded, mime, voter_id))
 
-        clear_runtime_caches()
         flash("Foto figurina aggiornata correttamente.")
         return redirect(url_for("player_home"))
 
@@ -549,7 +468,7 @@ def player_home():
         <a class="btn btn-blue" href="/player/matches">Scegli partita da votare</a>
         <a class="btn btn-green" href="/player/card">Visualizza la mia figurina</a>
         <a class="btn btn-dark" href="/player/history">Storico prestazioni</a>
-        <a class="btn btn-dark" href="/coach/refresh-awards">Aggiorna MOTW/MOTM</a><a class="btn" href="/logout">Esci</a>
+        <a class="btn" href="/logout">Esci</a>
     </div>
     """
 
@@ -584,126 +503,10 @@ def parse_vote(value):
 
 
 
-
-
-
-def ensure_awards_cache_table():
-    db_query("""
-        CREATE TABLE IF NOT EXISTS awards_cache (
-            award_key TEXT PRIMARY KEY,
-            player_id INTEGER,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-
-def rebuild_awards_cache():
-    """Ricalcola MOTW/MOTM solo quando serve, non ad ogni apertura della figurina."""
-    ensure_awards_cache_table()
-
-    motw_id = None
-    motm_id = None
-
-    try:
-        rows = db_query("""
-            WITH last_match AS (
-                SELECT m.id
-                FROM matches m
-                WHERE EXISTS (
-                    SELECT 1
-                    FROM player_votes pv
-                    WHERE pv.match_id=m.id
-                )
-                ORDER BY m.match_date DESC, m.id DESC
-                LIMIT 1
-            ),
-            avgs AS (
-                SELECT v.voted_player_id, AVG(v.rating) AS media
-                FROM player_votes v
-                JOIN last_match lm ON lm.id=v.match_id
-                GROUP BY v.voted_player_id
-            )
-            SELECT voted_player_id
-            FROM avgs
-            WHERE media = (SELECT MAX(media) FROM avgs)
-            ORDER BY RANDOM()
-            LIMIT 1
-        """, fetch=True)
-
-        if rows:
-            motw_id = rows[0]["voted_player_id"]
-    except Exception:
-        motw_id = None
-
-    try:
-        rows = db_query("""
-            WITH avgs AS (
-                SELECT v.voted_player_id, AVG(v.rating) AS media
-                FROM player_votes v
-                JOIN matches m ON m.id=v.match_id
-                WHERE m.match_date::date >= date_trunc('month', CURRENT_DATE) - INTERVAL '1 month'
-                  AND m.match_date::date < date_trunc('month', CURRENT_DATE)
-                GROUP BY v.voted_player_id
-            )
-            SELECT voted_player_id
-            FROM avgs
-            WHERE media = (SELECT MAX(media) FROM avgs)
-            ORDER BY RANDOM()
-            LIMIT 1
-        """, fetch=True)
-
-        if rows:
-            motm_id = rows[0]["voted_player_id"]
-    except Exception:
-        motm_id = None
-
-    db_query("""
-        INSERT INTO awards_cache (award_key, player_id, updated_at)
-        VALUES ('MOTW', ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(award_key)
-        DO UPDATE SET player_id=excluded.player_id, updated_at=CURRENT_TIMESTAMP
-    """, (motw_id,))
-
-    db_query("""
-        INSERT INTO awards_cache (award_key, player_id, updated_at)
-        VALUES ('MOTM', ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(award_key)
-        DO UPDATE SET player_id=excluded.player_id, updated_at=CURRENT_TIMESTAMP
-    """, (motm_id,))
-
-    try:
-        MOT_CACHE["expires_at"] = 0
-    except Exception:
-        pass
-
-
-def clear_runtime_caches():
-    """Svuota le cache quando vengono modificati dati importanti."""
-    try:
-        MOT_CACHE["expires_at"] = 0
-        MOT_CACHE["motw_id"] = None
-        MOT_CACHE["motm_id"] = None
-    except Exception:
-        pass
-
-    try:
-        PLAYER_CARD_CACHE.clear()
-    except Exception:
-        pass
-
-    try:
-        PLAYER_HISTORY_CACHE.clear()
-    except Exception:
-        pass
-
-
-def get_cached_player_card_data(player_id):
-    """Dati figurina cacheati: evita query aggregate ad ogni apertura."""
-    now = time.time()
-    cached = PLAYER_CARD_CACHE.get(player_id)
-
-    if cached and cached.get("expires_at", 0) > now:
-        return cached["data"]
+@app.route("/player/card")
+@login_required("player")
+def player_card():
+    player_id = session["player_id"]
 
     rows = db_query("""
         SELECT
@@ -713,48 +516,72 @@ def get_cached_player_card_data(player_id):
             COALESCE(p.role, '') AS role,
             COALESCE(p.photo_data, '') AS photo_data,
             COALESCE(p.photo_mime, 'image/jpeg') AS photo_mime,
-            COALESCE(ps.presenze, 0) AS presenze,
-            COALESCE(ps.gol, 0) AS gol,
-            COALESCE(ps.assist, 0) AS assist,
-            COALESCE(vs.media_voto, 0) AS media_voto
+            COUNT(a.id) AS presenze,
+            COALESCE(SUM(a.goals), 0) AS gol,
+            COALESCE(SUM(a.assists), 0) AS assist,
+            COALESCE(ROUND(AVG(v.rating)::numeric, 2), 0) AS media_voto
         FROM players p
-        LEFT JOIN (
-            SELECT
-                player_id,
-                COUNT(*) AS presenze,
-                SUM(goals) AS gol,
-                SUM(assists) AS assist
-            FROM appearances
-            WHERE player_id=?
-            GROUP BY player_id
-        ) ps ON ps.player_id=p.id
-        LEFT JOIN (
-            SELECT
-                voted_player_id AS player_id,
-                ROUND(AVG(rating)::numeric, 2) AS media_voto
-            FROM player_votes
-            WHERE voted_player_id=?
-            GROUP BY voted_player_id
-        ) vs ON vs.player_id=p.id
+        LEFT JOIN appearances a ON a.player_id=p.id
+        LEFT JOIN player_votes v ON v.voted_player_id=p.id
         WHERE p.id=?
-    """, (player_id, player_id, player_id), fetch=True)
+        GROUP BY p.id, p.first_name, p.last_name, p.role, p.photo_data, p.photo_mime
+    """, (player_id,), fetch=True)
 
-    data = rows[0] if rows else None
-    PLAYER_CARD_CACHE[player_id] = {
-        "expires_at": now + PLAYER_CARD_CACHE_TTL,
-        "data": data,
-    }
-    return data
+    if not rows:
+        flash("Giocatore non trovato.")
+        return redirect(url_for("player_home"))
+
+    p = rows[0]
+    full_name = f"{p['last_name']} {p['first_name']}".strip()
+
+    if p["photo_data"]:
+        photo_html = f"<img class='card-photo' src='data:{p['photo_mime']};base64,{p['photo_data']}' alt='Foto giocatore'>"
+    else:
+        photo_html = "<div class='card-placeholder'>👤</div>"
+
+    content = f"""
+    <div class="card card-preview">
+        {photo_html}
+        <div class="card-name">{full_name}</div>
+        <div class="card-role">{p['role'] or '-'}</div>
+
+        <div class="stats-grid">
+            <div class="stat-box">
+                <div class="stat-value">{p['presenze']}</div>
+                <div class="stat-label">Partite</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{p['gol']}</div>
+                <div class="stat-label">Gol</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{p['assist']}</div>
+                <div class="stat-label">Assist</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{p['media_voto']}</div>
+                <div class="stat-label">Voto</div>
+            </div>
+        </div>
+    </div>
+
+    <a class="btn btn-blue" href="/player">Area giocatore</a>
+    """
+
+    return page("La mia figurina", f"Ciao {session.get('player_name')}", content)
 
 
-def get_cached_player_history(player_id, start_filter, end_filter):
-    """Storico prestazioni cacheato per ridurre query ripetute."""
-    key = (player_id, start_filter, end_filter)
-    now = time.time()
-    cached = PLAYER_HISTORY_CACHE.get(key)
 
-    if cached and cached.get("expires_at", 0) > now:
-        return cached["rows"]
+@app.route("/player/history")
+@login_required("player")
+def player_history():
+    player_id = session["player_id"]
+
+    start_date = request.args.get("start_date", "").strip()
+    end_date = request.args.get("end_date", "").strip()
+
+    start_filter = start_date if start_date else "1900-01-01"
+    end_filter = end_date if end_date else "2999-12-31"
 
     rows = db_query("""
         SELECT
@@ -786,127 +613,6 @@ def get_cached_player_history(player_id, start_filter, end_filter):
           AND m.match_date BETWEEN ? AND ?
         ORDER BY m.match_date DESC, m.id DESC
     """, (player_id, player_id, start_filter, end_filter), fetch=True)
-
-    PLAYER_HISTORY_CACHE[key] = {
-        "expires_at": now + PLAYER_HISTORY_CACHE_TTL,
-        "rows": rows,
-    }
-
-    return rows
-
-
-def get_motw_motm_ids():
-    """Legge MOTW/MOTM dalla cache DB: query leggerissima."""
-    now = time.time()
-
-    if MOT_CACHE.get("expires_at", 0) > now:
-        return MOT_CACHE.get("motw_id"), MOT_CACHE.get("motm_id")
-
-    motw_id = None
-    motm_id = None
-
-    try:
-        ensure_awards_cache_table()
-        rows = db_query("""
-            SELECT award_key, player_id
-            FROM awards_cache
-            WHERE award_key IN ('MOTW', 'MOTM')
-        """, fetch=True)
-
-        for r in rows:
-            if r["award_key"] == "MOTW":
-                motw_id = r["player_id"]
-            elif r["award_key"] == "MOTM":
-                motm_id = r["player_id"]
-
-    except Exception:
-        motw_id = None
-        motm_id = None
-
-    MOT_CACHE["motw_id"] = motw_id
-    MOT_CACHE["motm_id"] = motm_id
-    MOT_CACHE["expires_at"] = now + 900
-
-    return motw_id, motm_id
-
-
-
-
-@app.route("/player/card")
-@login_required("player")
-def player_card():
-    player_id = session["player_id"]
-
-    p = get_cached_player_card_data(player_id)
-
-    if not p:
-        flash("Giocatore non trovato.")
-        return redirect(url_for("player_home"))
-
-    full_name = f"{p['last_name']} {p['first_name']}".strip()
-
-    motw_id, motm_id = get_motw_motm_ids()
-
-    special_class = ""
-    badge_html = ""
-
-    if player_id == motw_id:
-        special_class = "special-card-motw"
-        badge_html = "<div class='special-badge special-badge-motw'>⚡ MOTW ⚡</div>"
-    elif player_id == motm_id:
-        special_class = "special-card-motm"
-        badge_html = "<div class='special-badge special-badge-motm'>🔥 MOTM 🔥</div>"
-
-    if p["photo_data"]:
-        photo_html = f"<img class='card-photo' loading='lazy' src='data:{p['photo_mime']};base64,{p['photo_data']}' alt='Foto giocatore'>"
-    else:
-        photo_html = "<div class='card-placeholder'>👤</div>"
-
-    content = f"""
-    <div class="card card-preview {special_class}">
-        {badge_html}
-        {photo_html}
-        <div class="card-name">{full_name}</div>
-        <div class="card-role">{p['role'] or '-'}</div>
-
-        <div class="stats-grid">
-            <div class="stat-box">
-                <div class="stat-value">{p['presenze']}</div>
-                <div class="stat-label">Partite</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-value">{p['gol']}</div>
-                <div class="stat-label">Gol</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-value">{p['assist']}</div>
-                <div class="stat-label">Assist</div>
-            </div>
-            <div class="stat-box">
-                <div class="stat-value">{p['media_voto']}</div>
-                <div class="stat-label">Voto</div>
-            </div>
-        </div>
-    </div>
-
-    <a class="btn btn-blue" href="/player">Area giocatore</a>
-    """
-
-    return page("La mia figurina", f"Ciao {session.get('player_name')}", content)
-
-
-@app.route("/player/history")
-@login_required("player")
-def player_history():
-    player_id = session["player_id"]
-
-    start_date = request.args.get("start_date", "").strip()
-    end_date = request.args.get("end_date", "").strip()
-
-    start_filter = start_date if start_date else "1900-01-01"
-    end_filter = end_date if end_date else "2999-12-31"
-
-    rows = get_cached_player_history(player_id, start_filter, end_filter)
 
     if not rows:
         cards = """
@@ -1139,16 +845,6 @@ def player_votes(match_id):
             flash("Inserisci almeno un voto prima di salvare.")
             return redirect(url_for("player_votes", match_id=match_id))
 
-        clear_runtime_caches()
-        try:
-            rebuild_awards_cache()
-        except Exception:
-            pass
-        try:
-            rebuild_awards_cache()
-        except Exception:
-            pass
-        clear_runtime_caches()
         flash(f"Voti salvati: {saved}. Non potrai più modificarli per questa partita.")
         return redirect(url_for("player_matches"))
 
@@ -1210,19 +906,6 @@ def coach_panel():
     """
     return page("Allenatore", "Gestione rapida da telefono", content)
 
-
-
-
-@app.route("/coach/refresh-awards")
-@login_required("coach")
-def coach_refresh_awards():
-    try:
-        rebuild_awards_cache()
-        clear_runtime_caches()
-        flash("MOTW/MOTM aggiornati.")
-    except Exception as exc:
-        flash(f"Errore aggiornamento MOTW/MOTM: {exc}")
-    return redirect(url_for("coach_home"))
 
 
 @app.route("/coach/player-stats")
@@ -1451,7 +1134,6 @@ def coach_formation():
                 INSERT INTO appearances (match_id,player_id,starter,minutes,goals,assists,yellow_cards,red_cards)
                 VALUES (?,?,?,?,?,?,?,?)
             """, (match_id, pid, starter, minutes, goals, assists, yellow, red))
-        clear_runtime_caches()
         flash("Formazione salvata.")
         return redirect(url_for("coach_formation", match_id=match_id))
     existing = {}
@@ -1498,7 +1180,6 @@ def coach_training():
             except ValueError:
                 status_int = 0
             db_query("INSERT INTO training_attendance (session_id,player_id,present) VALUES (?,?,?)", (session_id, pid, status_int))
-        clear_runtime_caches()
         flash("Presenze salvate.")
         return redirect(url_for("coach_training", session_id=session_id))
     existing = {}

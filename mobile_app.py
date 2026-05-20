@@ -10,18 +10,14 @@ from datetime import date
 from functools import wraps
 from PIL import Image, ImageOps
 
-from flask import Flask, request, redirect, url_for, session, flash, get_flashed_messages
+from flask import Flask, request, redirect, url_for, session, render_template_string, flash, get_flashed_messages
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL non trovata. Controlla il file .env.")
 
-DB_POOL = SimpleConnectionPool(1, 2, dsn=DATABASE_URL)
-
-# In produzione Render deve essere False per massima velocità.
-# Metti INIT_DB_ON_START=true solo se devi creare/aggiornare le tabelle.
-INIT_DB_ON_START = os.getenv("INIT_DB_ON_START", "false").lower() == "true"
+DB_POOL = SimpleConnectionPool(1, 8, dsn=DATABASE_URL)
 
 
 COACH_PASSWORD = "spezzanese2627"
@@ -153,17 +149,8 @@ def ensure_db():
         conn.commit()
 
 
-DB_READY = False
-
 def ensure_mobile_tables():
-    global DB_READY
-    if DB_READY:
-        return
-    if not INIT_DB_ON_START:
-        DB_READY = True
-        return
     ensure_db()
-    DB_READY = True
 
 
 def ui_date(date_str):
@@ -442,13 +429,9 @@ def page(title, subtitle, content):
     """
 
 
-@app.route("/ping")
-def ping():
-    return "ok", 200
-
-
 @app.route("/", methods=["GET", "POST"])
 def home():
+    ensure_mobile_tables()
     if request.method == "POST":
         mode = request.form.get("mode")
         if mode == "player":
@@ -502,42 +485,12 @@ def player_home():
 
         data = photo.read()
 
-        # Le foto da telefono vengono ridimensionate e compresse automaticamente.
-        # Il controllo viene fatto sul Base64 finale, perché nel database occupa più spazio del file originale.
-        try:
-            img = Image.open(BytesIO(data))
-            img = ImageOps.exif_transpose(img).convert("RGB")
-
-            max_base64_size = 3 * 1024 * 1024
-            encoded = None
-            compressed = None
-
-            for max_side in [900, 800, 700, 600, 500]:
-                temp_img = img.copy()
-                temp_img.thumbnail((max_side, max_side))
-
-                for quality in [78, 72, 66, 60, 54, 48]:
-                    output = BytesIO()
-                    temp_img.save(output, format="JPEG", quality=quality, optimize=True)
-                    compressed = output.getvalue()
-                    test_encoded = base64.b64encode(compressed).decode("utf-8")
-
-                    if len(test_encoded.encode("utf-8")) <= max_base64_size:
-                        encoded = test_encoded
-                        break
-
-                if encoded is not None:
-                    break
-
-            if encoded is None:
-                flash("Foto troppo grande. Prova a ritagliarla o sceglierne una diversa.")
-                return redirect(url_for("player_home"))
-
-            mime = "image/jpeg"
-
-        except Exception:
-            flash("Non sono riuscito a leggere la foto. Prova con un'immagine JPG o PNG.")
+        if len(data) > 2 * 1024 * 1024:
+            flash("Foto troppo grande. Usa una foto sotto i 2 MB.")
             return redirect(url_for("player_home"))
+
+        encoded = base64.b64encode(data).decode("utf-8")
+        mime = photo.mimetype or "image/jpeg"
 
         # Sostituisce completamente la vecchia immagine profilo.
         db_query("""
@@ -609,28 +562,40 @@ def parse_vote(value):
 
 
 def get_motw_motm_ids():
-    """Calcola MOTW e MOTM in modo leggero."""
+    """Calcola MOTW e MOTM in modo leggero. In caso di pari merito sceglie casualmente."""
     motw_id = None
     motm_id = None
 
     try:
         rows = db_query("""
-            SELECT v.voted_player_id, AVG(v.rating) AS avg_rating, COUNT(v.id) AS votes_count
-            FROM player_votes v
-            WHERE v.match_id = (
+            WITH last_match AS (
                 SELECT m.id
                 FROM matches m
                 JOIN player_votes pv ON pv.match_id=m.id
                 GROUP BY m.id, m.match_date
                 ORDER BY m.match_date DESC, m.id DESC
                 LIMIT 1
+            ),
+            player_avgs AS (
+                SELECT
+                    v.voted_player_id,
+                    AVG(v.rating) AS avg_rating,
+                    COUNT(v.id) AS votes_count
+                FROM player_votes v
+                JOIN last_match lm ON lm.id=v.match_id
+                GROUP BY v.voted_player_id
+                HAVING COUNT(v.id) > 0
+            ),
+            best_avg AS (
+                SELECT MAX(avg_rating) AS max_rating
+                FROM player_avgs
             )
-            GROUP BY v.voted_player_id
-            HAVING COUNT(v.id) > 0
-            ORDER BY AVG(v.rating) DESC, COUNT(v.id) DESC
+            SELECT pa.voted_player_id
+            FROM player_avgs pa
+            JOIN best_avg b ON pa.avg_rating=b.max_rating
+            ORDER BY RANDOM()
             LIMIT 1
         """, fetch=True)
-
         if rows:
             motw_id = rows[0]["voted_player_id"]
     except Exception:
@@ -638,17 +603,28 @@ def get_motw_motm_ids():
 
     try:
         rows = db_query("""
-            SELECT v.voted_player_id, AVG(v.rating) AS avg_rating, COUNT(v.id) AS votes_count
-            FROM player_votes v
-            JOIN matches m ON m.id=v.match_id
-            WHERE m.match_date::date >= date_trunc('month', CURRENT_DATE) - INTERVAL '1 month'
-              AND m.match_date::date < date_trunc('month', CURRENT_DATE)
-            GROUP BY v.voted_player_id
-            HAVING COUNT(v.id) > 0
-            ORDER BY AVG(v.rating) DESC, COUNT(v.id) DESC
+            WITH player_avgs AS (
+                SELECT
+                    v.voted_player_id,
+                    AVG(v.rating) AS avg_rating,
+                    COUNT(v.id) AS votes_count
+                FROM player_votes v
+                JOIN matches m ON m.id=v.match_id
+                WHERE m.match_date::date >= date_trunc('month', CURRENT_DATE) - INTERVAL '1 month'
+                  AND m.match_date::date < date_trunc('month', CURRENT_DATE)
+                GROUP BY v.voted_player_id
+                HAVING COUNT(v.id) > 0
+            ),
+            best_avg AS (
+                SELECT MAX(avg_rating) AS max_rating
+                FROM player_avgs
+            )
+            SELECT pa.voted_player_id
+            FROM player_avgs pa
+            JOIN best_avg b ON pa.avg_rating=b.max_rating
+            ORDER BY RANDOM()
             LIMIT 1
         """, fetch=True)
-
         if rows:
             motm_id = rows[0]["voted_player_id"]
     except Exception:
@@ -736,6 +712,125 @@ def player_card():
     """
 
     return page("La mia figurina", f"Ciao {session.get('player_name')}", content)
+
+
+@app.route("/player/history")
+@login_required("player")
+def player_history():
+    player_id = session["player_id"]
+
+    start_date = request.args.get("start_date", "").strip()
+    end_date = request.args.get("end_date", "").strip()
+
+    start_filter = start_date if start_date else "1900-01-01"
+    end_filter = end_date if end_date else "2999-12-31"
+
+    rows = db_query("""
+        SELECT
+            m.id AS match_id,
+            m.match_date,
+            m.opponent,
+            m.competition,
+            m.home_away,
+            COALESCE(m.result, '') AS result,
+            COALESCE(a.starter, 0) AS starter,
+            COALESCE(a.minutes, 0) AS minutes,
+            COALESCE(a.goals, 0) AS goals,
+            COALESCE(a.assists, 0) AS assists,
+            COALESCE(a.yellow_cards, 0) AS yellow_cards,
+            COALESCE(a.red_cards, 0) AS red_cards,
+            COALESCE(v.media_voto, 0) AS media_voto
+        FROM appearances a
+        JOIN matches m ON m.id=a.match_id
+        LEFT JOIN (
+            SELECT
+                match_id,
+                voted_player_id,
+                ROUND(AVG(rating)::numeric, 2) AS media_voto
+            FROM player_votes
+            WHERE voted_player_id=?
+            GROUP BY match_id, voted_player_id
+        ) v ON v.match_id=m.id AND v.voted_player_id=a.player_id
+        WHERE a.player_id=?
+          AND m.match_date BETWEEN ? AND ?
+        ORDER BY m.match_date DESC, m.id DESC
+    """, (player_id, player_id, start_filter, end_filter), fetch=True)
+
+    if not rows:
+        cards = """
+        <div class="card">
+            Nessuna prestazione trovata per il periodo selezionato.
+        </div>
+        """
+    else:
+        cards = ""
+
+        for r in rows:
+            titolare = "Titolare" if int(r["starter"] or 0) == 1 else "Panchina/Subentrato"
+
+            cards += f"""
+            <div class="performance-card">
+                <div class="performance-title">{ui_date(r['match_date'])} · {r['opponent']}</div>
+                <div class="performance-meta">{r['competition']} · {r['home_away']} · Risultato: {r['result'] or '-'} · {titolare}</div>
+
+                <div class="performance-grid">
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['minutes']}</div>
+                        <div class="performance-label">Min</div>
+                    </div>
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['goals']}</div>
+                        <div class="performance-label">Gol</div>
+                    </div>
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['assists']}</div>
+                        <div class="performance-label">Assist</div>
+                    </div>
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['yellow_cards']}</div>
+                        <div class="performance-label">Gialli</div>
+                    </div>
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['red_cards']}</div>
+                        <div class="performance-label">Rossi</div>
+                    </div>
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['media_voto']}</div>
+                        <div class="performance-label">Voto</div>
+                    </div>
+                </div>
+            </div>
+            """
+
+    today = date.today().isoformat()
+
+    content = f"""
+    <div class="card">
+        <h2>Storico prestazioni</h2>
+        <div class="small">Qui vedi solo le tue partite giocate.</div>
+
+        <form method="get">
+            <div class="inline">
+                <div>
+                    <label>Dal</label>
+                    <input type="date" name="start_date" value="{start_date}">
+                </div>
+                <div>
+                    <label>Al</label>
+                    <input type="date" name="end_date" value="{end_date or today}">
+                </div>
+            </div>
+            <button class="btn-blue">Filtra periodo</button>
+            <a class="btn btn-dark" href="/player/history">Azzera filtro</a>
+        </form>
+    </div>
+
+    {cards}
+
+    <a class="btn btn-blue" href="/player">Area giocatore</a>
+    """
+
+    return page("Storico prestazioni", f"Ciao {session.get('player_name')}", content)
 
 
 @app.route("/player/matches")
@@ -892,10 +987,6 @@ def player_votes(match_id):
             flash("Inserisci almeno un voto prima di salvare.")
             return redirect(url_for("player_votes", match_id=match_id))
 
-        try:
-            rebuild_player_stats_cache()
-        except Exception:
-            pass
         flash(f"Voti salvati: {saved}. Non potrai più modificarli per questa partita.")
         return redirect(url_for("player_matches"))
 
@@ -959,58 +1050,24 @@ def coach_panel():
 
 
 
+@app.route("/coach/player-stats")
+@login_required("coach")
+def coach_player_stats():
+    start_date = request.args.get("start_date", "").strip()
+    end_date = request.args.get("end_date", "").strip()
 
-def ensure_stats_cache_table():
-    """Crea la tabella cache statistiche se non esiste."""
-    db_query("""
-        CREATE TABLE IF NOT EXISTS player_stats_cache (
-            player_id INTEGER PRIMARY KEY REFERENCES players(id) ON DELETE CASCADE,
-            player_name TEXT DEFAULT '',
-            role TEXT DEFAULT '',
-            presenze INTEGER DEFAULT 0,
-            titolare INTEGER DEFAULT 0,
-            subentrato INTEGER DEFAULT 0,
-            sostituito INTEGER DEFAULT 0,
-            minuti INTEGER DEFAULT 0,
-            gol INTEGER DEFAULT 0,
-            assist INTEGER DEFAULT 0,
-            ammonizioni INTEGER DEFAULT 0,
-            espulsioni INTEGER DEFAULT 0,
-            all_presenti INTEGER DEFAULT 0,
-            media_voto NUMERIC(4,2) DEFAULT 0,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+    today = date.today().isoformat()
 
+    # Se una data non è impostata, uso un intervallo larghissimo.
+    start_filter = start_date if start_date else "1900-01-01"
+    end_filter = end_date if end_date else "2999-12-31"
 
-def rebuild_player_stats_cache():
-    """Aggiorna la cache statistiche stagione completa."""
-    ensure_stats_cache_table()
-
-    db_query("DELETE FROM player_stats_cache")
-
-    db_query("""
-        INSERT INTO player_stats_cache (
-            player_id,
-            player_name,
-            role,
-            presenze,
-            titolare,
-            subentrato,
-            sostituito,
-            minuti,
-            gol,
-            assist,
-            ammonizioni,
-            espulsioni,
-            all_presenti,
-            media_voto,
-            updated_at
-        )
+    rows = db_query("""
         SELECT
             p.id,
             trim(p.last_name || ' ' || p.first_name) AS player_name,
             COALESCE(p.role, '') AS role,
+
             COALESCE(ms.presenze, 0) AS presenze,
             COALESCE(ms.titolare, 0) AS titolare,
             COALESCE(si.subentrato, 0) AS subentrato,
@@ -1021,8 +1078,8 @@ def rebuild_player_stats_cache():
             COALESCE(ms.ammonizioni, 0) AS ammonizioni,
             COALESCE(ms.espulsioni, 0) AS espulsioni,
             COALESCE(tr.all_presenti, 0) AS all_presenti,
-            COALESCE(vs.media_voto, 0) AS media_voto,
-            CURRENT_TIMESTAMP AS updated_at
+            COALESCE(vt.media_voto, 0) AS media_voto
+
         FROM players p
 
         LEFT JOIN (
@@ -1036,19 +1093,29 @@ def rebuild_player_stats_cache():
                 SUM(a.yellow_cards) AS ammonizioni,
                 SUM(a.red_cards) AS espulsioni
             FROM appearances a
+            JOIN matches m ON m.id=a.match_id
+            WHERE m.match_date BETWEEN ? AND ?
             GROUP BY a.player_id
         ) ms ON ms.player_id=p.id
 
         LEFT JOIN (
-            SELECT player_in_id AS player_id, COUNT(*) AS subentrato
-            FROM substitutions
-            GROUP BY player_in_id
+            SELECT
+                s.player_in_id AS player_id,
+                COUNT(*) AS subentrato
+            FROM substitutions s
+            JOIN matches m ON m.id=s.match_id
+            WHERE m.match_date BETWEEN ? AND ?
+            GROUP BY s.player_in_id
         ) si ON si.player_id=p.id
 
         LEFT JOIN (
-            SELECT player_out_id AS player_id, COUNT(*) AS sostituito
-            FROM substitutions
-            GROUP BY player_out_id
+            SELECT
+                s.player_out_id AS player_id,
+                COUNT(*) AS sostituito
+            FROM substitutions s
+            JOIN matches m ON m.id=s.match_id
+            WHERE m.match_date BETWEEN ? AND ?
+            GROUP BY s.player_out_id
         ) so ON so.player_id=p.id
 
         LEFT JOIN (
@@ -1056,147 +1123,29 @@ def rebuild_player_stats_cache():
                 ta.player_id,
                 SUM(CASE WHEN ta.present=1 THEN 1 ELSE 0 END) AS all_presenti
             FROM training_attendance ta
+            JOIN training_sessions ts ON ts.id=ta.session_id
+            WHERE ts.training_date BETWEEN ? AND ?
             GROUP BY ta.player_id
         ) tr ON tr.player_id=p.id
 
         LEFT JOIN (
             SELECT
-                voted_player_id AS player_id,
-                ROUND(AVG(rating)::numeric, 2) AS media_voto
-            FROM player_votes
-            GROUP BY voted_player_id
-        ) vs ON vs.player_id=p.id
-    """)
+                v.voted_player_id AS player_id,
+                ROUND(AVG(v.rating)::numeric, 2) AS media_voto
+            FROM player_votes v
+            JOIN matches m ON m.id=v.match_id
+            WHERE m.match_date BETWEEN ? AND ?
+            GROUP BY v.voted_player_id
+        ) vt ON vt.player_id=p.id
 
-
-def rebuild_player_stats_cache_if_needed():
-    """Aggiorna la cache solo se è vuota o vecchia di oltre 60 secondi."""
-    ensure_stats_cache_table()
-
-    rows = db_query("""
-        SELECT
-            COUNT(*) AS total,
-            COALESCE(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - MAX(updated_at))), 999999) AS age_seconds
-        FROM player_stats_cache
-    """, fetch=True)
-
-    total = int(rows[0]["total"] or 0)
-    age_seconds = float(rows[0]["age_seconds"] or 999999)
-
-    if total == 0 or age_seconds > 60:
-        rebuild_player_stats_cache()
-
-
-@app.route("/coach/player-stats")
-@login_required("coach")
-def coach_player_stats():
-    start_date = request.args.get("start_date", "").strip()
-    end_date = request.args.get("end_date", "").strip()
-
-    today = date.today().isoformat()
-
-    # Se non c'è filtro periodo, usa cache precalcolata molto veloce.
-    if not start_date and not end_date:
-        rebuild_player_stats_cache_if_needed()
-
-        rows = db_query("""
-            SELECT
-                player_id AS id,
-                player_name,
-                role,
-                presenze,
-                titolare,
-                subentrato,
-                sostituito,
-                minuti,
-                gol,
-                assist,
-                ammonizioni,
-                espulsioni,
-                all_presenti,
-                media_voto
-            FROM player_stats_cache
-            ORDER BY minuti DESC, player_name
-        """, fetch=True)
-
-    else:
-        # Con filtro periodo ricalcola solo su richiesta.
-        start_filter = start_date if start_date else "1900-01-01"
-        end_filter = end_date if end_date else "2999-12-31"
-
-        rows = db_query("""
-            WITH match_stats AS (
-                SELECT
-                    a.player_id,
-                    COUNT(*) AS presenze,
-                    SUM(CASE WHEN a.starter=1 THEN 1 ELSE 0 END) AS titolare,
-                    SUM(a.minutes) AS minuti,
-                    SUM(a.goals) AS gol,
-                    SUM(a.assists) AS assist,
-                    SUM(a.yellow_cards) AS ammonizioni,
-                    SUM(a.red_cards) AS espulsioni
-                FROM appearances a
-                JOIN matches m ON m.id=a.match_id
-                WHERE m.match_date BETWEEN ? AND ?
-                GROUP BY a.player_id
-            ),
-            sub_in AS (
-                SELECT s.player_in_id AS player_id, COUNT(*) AS subentrato
-                FROM substitutions s
-                JOIN matches m ON m.id=s.match_id
-                WHERE m.match_date BETWEEN ? AND ?
-                GROUP BY s.player_in_id
-            ),
-            sub_out AS (
-                SELECT s.player_out_id AS player_id, COUNT(*) AS sostituito
-                FROM substitutions s
-                JOIN matches m ON m.id=s.match_id
-                WHERE m.match_date BETWEEN ? AND ?
-                GROUP BY s.player_out_id
-            ),
-            trainings AS (
-                SELECT ta.player_id, SUM(CASE WHEN ta.present=1 THEN 1 ELSE 0 END) AS all_presenti
-                FROM training_attendance ta
-                JOIN training_sessions ts ON ts.id=ta.session_id
-                WHERE ts.training_date BETWEEN ? AND ?
-                GROUP BY ta.player_id
-            ),
-            vote_stats AS (
-                SELECT v.voted_player_id AS player_id, ROUND(AVG(v.rating)::numeric, 2) AS media_voto
-                FROM player_votes v
-                JOIN matches m ON m.id=v.match_id
-                WHERE m.match_date BETWEEN ? AND ?
-                GROUP BY v.voted_player_id
-            )
-            SELECT
-                p.id,
-                trim(p.last_name || ' ' || p.first_name) AS player_name,
-                COALESCE(p.role, '') AS role,
-                COALESCE(ms.presenze, 0) AS presenze,
-                COALESCE(ms.titolare, 0) AS titolare,
-                COALESCE(si.subentrato, 0) AS subentrato,
-                COALESCE(so.sostituito, 0) AS sostituito,
-                COALESCE(ms.minuti, 0) AS minuti,
-                COALESCE(ms.gol, 0) AS gol,
-                COALESCE(ms.assist, 0) AS assist,
-                COALESCE(ms.ammonizioni, 0) AS ammonizioni,
-                COALESCE(ms.espulsioni, 0) AS espulsioni,
-                COALESCE(tr.all_presenti, 0) AS all_presenti,
-                COALESCE(vs.media_voto, 0) AS media_voto
-            FROM players p
-            LEFT JOIN match_stats ms ON ms.player_id=p.id
-            LEFT JOIN sub_in si ON si.player_id=p.id
-            LEFT JOIN sub_out so ON so.player_id=p.id
-            LEFT JOIN trainings tr ON tr.player_id=p.id
-            LEFT JOIN vote_stats vs ON vs.player_id=p.id
-            ORDER BY COALESCE(ms.minuti,0) DESC, p.last_name, p.first_name
-        """, (
-            start_filter, end_filter,
-            start_filter, end_filter,
-            start_filter, end_filter,
-            start_filter, end_filter,
-            start_filter, end_filter,
-        ), fetch=True)
+        ORDER BY COALESCE(ms.minuti,0) DESC, p.last_name, p.first_name
+    """, (
+        start_filter, end_filter,
+        start_filter, end_filter,
+        start_filter, end_filter,
+        start_filter, end_filter,
+        start_filter, end_filter,
+    ), fetch=True)
 
     table_rows = ""
 
@@ -1221,12 +1170,10 @@ def coach_player_stats():
     if not table_rows:
         table_rows = "<tr><td colspan='12'>Nessun giocatore presente.</td></tr>"
 
-    filtro_testo = "Statistiche caricate da cache veloce." if not start_date and not end_date else "Statistiche filtrate per periodo."
-
     content = f"""
     <div class="card">
         <h2>Statistiche giocatori</h2>
-        <div class="small">{filtro_testo}</div>
+        <div class="small">Filtra le statistiche per periodo. Se nel periodo non ci sono dati, i giocatori vengono mostrati con tutti i valori a 0.</div>
 
         <form method="get">
             <div class="inline">
@@ -1274,6 +1221,7 @@ def coach_player_stats():
     """
 
     return page("Statistiche giocatori", "Area allenatore", content)
+
 
 
 @app.route("/coach/matches", methods=["GET", "POST"])
@@ -1328,10 +1276,6 @@ def coach_formation():
                 INSERT INTO appearances (match_id,player_id,starter,minutes,goals,assists,yellow_cards,red_cards)
                 VALUES (?,?,?,?,?,?,?,?)
             """, (match_id, pid, starter, minutes, goals, assists, yellow, red))
-        try:
-            rebuild_player_stats_cache()
-        except Exception:
-            pass
         flash("Formazione salvata.")
         return redirect(url_for("coach_formation", match_id=match_id))
     existing = {}

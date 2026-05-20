@@ -111,13 +111,14 @@ def ensure_db():
                     match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
                     voter_player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
                     voted_player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
-                    rating INTEGER NOT NULL,
+                    rating NUMERIC(4,2) NOT NULL,
                     UNIQUE(match_id, voter_player_id, voted_player_id)
                 )
             """)
 
             cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS photo_data TEXT DEFAULT ''")
             cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS photo_mime TEXT DEFAULT ''")
+            cur.execute("ALTER TABLE player_votes ALTER COLUMN rating TYPE NUMERIC(4,2) USING rating::numeric")
 
             for table in ["players", "matches", "appearances", "substitutions", "training_sessions", "training_attendance", "player_votes"]:
                 seq = f"{table}_id_seq"
@@ -315,6 +316,33 @@ def player_home():
     return page("Area giocatore", f"Ciao {session.get('player_name')}", content)
 
 
+
+def vote_choices():
+    # Voti scolastici con + e -.
+    # Valore numerico usato per calcolare media:
+    # 6- = 5.75, 6 = 6.00, 6+ = 6.25, 6.5 = 6.50
+    choices = []
+    for base in range(4, 11):
+        choices.append((f"{base}-", base - 0.25))
+        choices.append((str(base), float(base)))
+        choices.append((f"{base}+", base + 0.25))
+        if base < 10:
+            choices.append((f"{base}.5", base + 0.5))
+    return choices
+
+
+def parse_vote(value):
+    try:
+        rating = float(value)
+    except Exception:
+        return None
+
+    if rating < 1 or rating > 10.25:
+        return None
+
+    return rating
+
+
 @app.route("/player/matches")
 @login_required("player")
 def player_matches():
@@ -454,12 +482,8 @@ def player_votes(match_id):
             if raw == "":
                 continue
 
-            try:
-                rating = int(raw)
-            except ValueError:
-                continue
-
-            if rating < 1 or rating > 10:
+            rating = parse_vote(raw)
+            if rating is None:
                 continue
 
             db_query("""
@@ -487,8 +511,8 @@ def player_votes(match_id):
 
         for row in rows:
             options = "<option value=''>--</option>"
-            for i in range(1, 11):
-                options += f"<option value='{i}'>{i}</option>"
+            for label, value in vote_choices():
+                options += f"<option value='{value}'>{label}</option>"
 
             items += f"""
             <div class="player-row">

@@ -756,6 +756,11 @@ def coach_player_stats():
             COALESCE(SUM(a.assists), 0) AS assist,
             COALESCE(SUM(a.yellow_cards), 0) AS ammonizioni,
             COALESCE(SUM(a.red_cards), 0) AS espulsioni,
+            COALESCE((
+                SELECT SUM(CASE WHEN ta.present=1 THEN 1 ELSE 0 END)
+                FROM training_attendance ta
+                WHERE ta.player_id=p.id
+            ), 0) AS all_presenti,
             COALESCE(ROUND(AVG(v.rating)::numeric, 2), 0) AS media_voto
         FROM players p
         LEFT JOIN appearances a ON a.player_id=p.id
@@ -779,6 +784,7 @@ def coach_player_stats():
             <td>{r['assist']}</td>
             <td>{r['ammonizioni']}</td>
             <td>{r['espulsioni']}</td>
+            <td>{r['all_presenti']}</td>
             <td><b>{r['media_voto']}</b></td>
         </tr>
         """
@@ -789,7 +795,7 @@ def coach_player_stats():
     content = f"""
     <div class="card">
         <h2>Statistiche giocatori</h2>
-        <div class="small">Classifica ordinata per minuti giocati.</div>
+        <div class="small">Classifica ordinata per minuti giocati. Include anche le presenze agli allenamenti.</div>
     </div>
 
     <div class="card">
@@ -807,6 +813,7 @@ def coach_player_stats():
                         <th>Ast</th>
                         <th>Amm</th>
                         <th>Esp</th>
+                        <th>Allen.</th>
                         <th>Voto</th>
                     </tr>
                 </thead>

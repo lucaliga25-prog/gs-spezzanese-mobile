@@ -15,7 +15,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL non trovata. Controlla il file .env.")
 
-DB_POOL = SimpleConnectionPool(1, 8, dsn=DATABASE_URL)
+DB_POOL = SimpleConnectionPool(1, 6, dsn=DATABASE_URL)
 
 
 COACH_PASSWORD = "spezzanese2627"
@@ -134,7 +134,32 @@ def ensure_db():
 
             cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS photo_data TEXT DEFAULT ''")
             cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS photo_mime TEXT DEFAULT ''")
-            cur.execute("ALTER TABLE player_votes ALTER COLUMN rating TYPE NUMERIC(4,2) USING rating::numeric")
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='player_votes' AND column_name='rating'
+                    ) THEN
+                        ALTER TABLE player_votes ALTER COLUMN rating TYPE NUMERIC(4,2) USING rating::numeric;
+                    END IF;
+                EXCEPTION WHEN others THEN
+                    NULL;
+                END $$;
+            """)
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='coach_votes' AND column_name='rating'
+                    ) THEN
+                        ALTER TABLE coach_votes ALTER COLUMN rating TYPE NUMERIC(4,2) USING rating::numeric;
+                    END IF;
+                EXCEPTION WHEN others THEN
+                    NULL;
+                END $$;
+            """)
 
             cur.execute("CREATE INDEX IF NOT EXISTS idx_appearances_player_match ON appearances(player_id, match_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_appearances_match ON appearances(match_id)")
@@ -144,6 +169,10 @@ def ensure_db():
             cur.execute("CREATE INDEX IF NOT EXISTS idx_coach_votes_voted_match ON coach_votes(voted_player_id, match_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_training_attendance_player_session ON training_attendance(player_id, session_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_training_sessions_date ON training_sessions(training_date)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_coach_votes_match_player ON coach_votes(match_id, voted_player_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_coach_votes_player_match ON coach_votes(voted_player_id, match_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_player_votes_match_player ON player_votes(match_id, voted_player_id)")
+
 
             for table in ["players", "matches", "appearances", "substitutions", "training_sessions", "training_attendance", "player_votes", "coach_votes"]:
                 seq = f"{table}_id_seq"
@@ -1116,31 +1145,11 @@ def coach_player_stats():
 
     today = date.today().isoformat()
 
-    # Se una data non è impostata, uso un intervallo larghissimo.
     start_filter = start_date if start_date else "1900-01-01"
     end_filter = end_date if end_date else "2999-12-31"
 
     rows = db_query("""
-        SELECT
-            p.id,
-            trim(p.last_name || ' ' || p.first_name) AS player_name,
-            COALESCE(p.role, '') AS role,
-
-            COALESCE(ms.presenze, 0) AS presenze,
-            COALESCE(ms.titolare, 0) AS titolare,
-            COALESCE(si.subentrato, 0) AS subentrato,
-            COALESCE(so.sostituito, 0) AS sostituito,
-            COALESCE(ms.minuti, 0) AS minuti,
-            COALESCE(ms.gol, 0) AS gol,
-            COALESCE(ms.assist, 0) AS assist,
-            COALESCE(ms.ammonizioni, 0) AS ammonizioni,
-            COALESCE(ms.espulsioni, 0) AS espulsioni,
-            COALESCE(tr.all_presenti, 0) AS all_presenti,
-            COALESCE(vt.media_voto, 0) AS media_voto
-
-        FROM players p
-
-        LEFT JOIN (
+        WITH match_stats AS (
             SELECT
                 a.player_id,
                 COUNT(*) AS presenze,
@@ -1154,54 +1163,63 @@ def coach_player_stats():
             JOIN matches m ON m.id=a.match_id
             WHERE m.match_date BETWEEN ? AND ?
             GROUP BY a.player_id
-        ) ms ON ms.player_id=p.id
-
-        LEFT JOIN (
-            SELECT
-                s.player_in_id AS player_id,
-                COUNT(*) AS subentrato
+        ),
+        sub_in AS (
+            SELECT s.player_in_id AS player_id, COUNT(*) AS subentrato
             FROM substitutions s
             JOIN matches m ON m.id=s.match_id
             WHERE m.match_date BETWEEN ? AND ?
             GROUP BY s.player_in_id
-        ) si ON si.player_id=p.id
-
-        LEFT JOIN (
-            SELECT
-                s.player_out_id AS player_id,
-                COUNT(*) AS sostituito
+        ),
+        sub_out AS (
+            SELECT s.player_out_id AS player_id, COUNT(*) AS sostituito
             FROM substitutions s
             JOIN matches m ON m.id=s.match_id
             WHERE m.match_date BETWEEN ? AND ?
             GROUP BY s.player_out_id
-        ) so ON so.player_id=p.id
-
-        LEFT JOIN (
-            SELECT
-                ta.player_id,
-                SUM(CASE WHEN ta.present=1 THEN 1 ELSE 0 END) AS all_presenti
+        ),
+        trainings AS (
+            SELECT ta.player_id, SUM(CASE WHEN ta.present=1 THEN 1 ELSE 0 END) AS all_presenti
             FROM training_attendance ta
             JOIN training_sessions ts ON ts.id=ta.session_id
             WHERE ts.training_date BETWEEN ? AND ?
             GROUP BY ta.player_id
-        ) tr ON tr.player_id=p.id
-
-        LEFT JOIN (
-            SELECT
-                all_votes.player_id,
-                ROUND(AVG(all_votes.rating)::numeric, 2) AS media_voto
-            FROM (
-                SELECT v.voted_player_id AS player_id, v.match_id, v.rating
-                FROM player_votes v
-                UNION ALL
-                SELECT cv.voted_player_id AS player_id, cv.match_id, cv.rating
-                FROM coach_votes cv
-            ) all_votes
-            JOIN matches m ON m.id=all_votes.match_id
+        ),
+        all_votes AS (
+            SELECT v.voted_player_id AS player_id, v.match_id, v.rating
+            FROM player_votes v
+            UNION ALL
+            SELECT cv.voted_player_id AS player_id, cv.match_id, cv.rating
+            FROM coach_votes cv
+        ),
+        vote_stats AS (
+            SELECT av.player_id, ROUND(AVG(av.rating)::numeric, 2) AS media_voto
+            FROM all_votes av
+            JOIN matches m ON m.id=av.match_id
             WHERE m.match_date BETWEEN ? AND ?
-            GROUP BY all_votes.player_id
-        ) vt ON vt.player_id=p.id
-
+            GROUP BY av.player_id
+        )
+        SELECT
+            p.id,
+            trim(p.last_name || ' ' || p.first_name) AS player_name,
+            COALESCE(p.role, '') AS role,
+            COALESCE(ms.presenze, 0) AS presenze,
+            COALESCE(ms.titolare, 0) AS titolare,
+            COALESCE(si.subentrato, 0) AS subentrato,
+            COALESCE(so.sostituito, 0) AS sostituito,
+            COALESCE(ms.minuti, 0) AS minuti,
+            COALESCE(ms.gol, 0) AS gol,
+            COALESCE(ms.assist, 0) AS assist,
+            COALESCE(ms.ammonizioni, 0) AS ammonizioni,
+            COALESCE(ms.espulsioni, 0) AS espulsioni,
+            COALESCE(tr.all_presenti, 0) AS all_presenti,
+            COALESCE(vs.media_voto, 0) AS media_voto
+        FROM players p
+        LEFT JOIN match_stats ms ON ms.player_id=p.id
+        LEFT JOIN sub_in si ON si.player_id=p.id
+        LEFT JOIN sub_out so ON so.player_id=p.id
+        LEFT JOIN trainings tr ON tr.player_id=p.id
+        LEFT JOIN vote_stats vs ON vs.player_id=p.id
         ORDER BY COALESCE(ms.minuti,0) DESC, p.last_name, p.first_name
     """, (
         start_filter, end_filter,
@@ -1285,7 +1303,6 @@ def coach_player_stats():
     """
 
     return page("Statistiche giocatori", "Area allenatore", content)
-
 
 
 @app.route("/coach/matches", methods=["GET", "POST"])

@@ -445,8 +445,8 @@ def player_home():
 
         data = photo.read()
 
-        if len(data) > 3 * 1024 * 1024:
-            flash("Foto troppo grande. Usa una foto sotto i 3 MB.")
+        if len(data) > 2 * 1024 * 1024:
+            flash("Foto troppo grande. Usa una foto sotto i 2 MB.")
             return redirect(url_for("player_home"))
 
         encoded = base64.b64encode(data).decode("utf-8")

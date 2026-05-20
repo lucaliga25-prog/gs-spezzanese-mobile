@@ -549,7 +549,7 @@ def player_home():
         <a class="btn btn-blue" href="/player/matches">Scegli partita da votare</a>
         <a class="btn btn-green" href="/player/card">Visualizza la mia figurina</a>
         <a class="btn btn-dark" href="/player/history">Storico prestazioni</a>
-        <a class="btn" href="/logout">Esci</a>
+        <a class="btn btn-dark" href="/coach/refresh-awards">Aggiorna MOTW/MOTM</a><a class="btn" href="/logout">Esci</a>
     </div>
     """
 
@@ -584,6 +584,97 @@ def parse_vote(value):
 
 
 
+
+
+
+def ensure_awards_cache_table():
+    db_query("""
+        CREATE TABLE IF NOT EXISTS awards_cache (
+            award_key TEXT PRIMARY KEY,
+            player_id INTEGER,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+
+def rebuild_awards_cache():
+    """Ricalcola MOTW/MOTM solo quando serve, non ad ogni apertura della figurina."""
+    ensure_awards_cache_table()
+
+    motw_id = None
+    motm_id = None
+
+    try:
+        rows = db_query("""
+            WITH last_match AS (
+                SELECT m.id
+                FROM matches m
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM player_votes pv
+                    WHERE pv.match_id=m.id
+                )
+                ORDER BY m.match_date DESC, m.id DESC
+                LIMIT 1
+            ),
+            avgs AS (
+                SELECT v.voted_player_id, AVG(v.rating) AS media
+                FROM player_votes v
+                JOIN last_match lm ON lm.id=v.match_id
+                GROUP BY v.voted_player_id
+            )
+            SELECT voted_player_id
+            FROM avgs
+            WHERE media = (SELECT MAX(media) FROM avgs)
+            ORDER BY RANDOM()
+            LIMIT 1
+        """, fetch=True)
+
+        if rows:
+            motw_id = rows[0]["voted_player_id"]
+    except Exception:
+        motw_id = None
+
+    try:
+        rows = db_query("""
+            WITH avgs AS (
+                SELECT v.voted_player_id, AVG(v.rating) AS media
+                FROM player_votes v
+                JOIN matches m ON m.id=v.match_id
+                WHERE m.match_date::date >= date_trunc('month', CURRENT_DATE) - INTERVAL '1 month'
+                  AND m.match_date::date < date_trunc('month', CURRENT_DATE)
+                GROUP BY v.voted_player_id
+            )
+            SELECT voted_player_id
+            FROM avgs
+            WHERE media = (SELECT MAX(media) FROM avgs)
+            ORDER BY RANDOM()
+            LIMIT 1
+        """, fetch=True)
+
+        if rows:
+            motm_id = rows[0]["voted_player_id"]
+    except Exception:
+        motm_id = None
+
+    db_query("""
+        INSERT INTO awards_cache (award_key, player_id, updated_at)
+        VALUES ('MOTW', ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(award_key)
+        DO UPDATE SET player_id=excluded.player_id, updated_at=CURRENT_TIMESTAMP
+    """, (motw_id,))
+
+    db_query("""
+        INSERT INTO awards_cache (award_key, player_id, updated_at)
+        VALUES ('MOTM', ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(award_key)
+        DO UPDATE SET player_id=excluded.player_id, updated_at=CURRENT_TIMESTAMP
+    """, (motm_id,))
+
+    try:
+        MOT_CACHE["expires_at"] = 0
+    except Exception:
+        pass
 
 
 def clear_runtime_caches():
@@ -705,7 +796,7 @@ def get_cached_player_history(player_id, start_filter, end_filter):
 
 
 def get_motw_motm_ids():
-    """Calcola MOTW/MOTM con cache di 5 minuti per evitare rallentamenti."""
+    """Legge MOTW/MOTM dalla cache DB: query leggerissima."""
     now = time.time()
 
     if MOT_CACHE.get("expires_at", 0) > now:
@@ -715,76 +806,29 @@ def get_motw_motm_ids():
     motm_id = None
 
     try:
-        # Ultima partita che ha almeno un voto.
-        last_match_rows = db_query("""
-            SELECT m.id
-            FROM matches m
-            WHERE EXISTS (
-                SELECT 1
-                FROM player_votes pv
-                WHERE pv.match_id=m.id
-            )
-            ORDER BY m.match_date DESC, m.id DESC
-            LIMIT 1
+        ensure_awards_cache_table()
+        rows = db_query("""
+            SELECT award_key, player_id
+            FROM awards_cache
+            WHERE award_key IN ('MOTW', 'MOTM')
         """, fetch=True)
 
-        if last_match_rows:
-            last_match_id = last_match_rows[0]["id"]
+        for r in rows:
+            if r["award_key"] == "MOTW":
+                motw_id = r["player_id"]
+            elif r["award_key"] == "MOTM":
+                motm_id = r["player_id"]
 
-            rows = db_query("""
-                SELECT voted_player_id, AVG(rating) AS media
-                FROM player_votes
-                WHERE match_id=?
-                GROUP BY voted_player_id
-                HAVING AVG(rating) = (
-                    SELECT MAX(avg_rating)
-                    FROM (
-                        SELECT AVG(rating) AS avg_rating
-                        FROM player_votes
-                        WHERE match_id=?
-                        GROUP BY voted_player_id
-                    ) x
-                )
-                ORDER BY RANDOM()
-                LIMIT 1
-            """, (last_match_id, last_match_id), fetch=True)
-
-            if rows:
-                motw_id = rows[0]["voted_player_id"]
     except Exception:
         motw_id = None
-
-    try:
-        rows = db_query("""
-            WITH month_votes AS (
-                SELECT v.voted_player_id, v.rating
-                FROM player_votes v
-                JOIN matches m ON m.id=v.match_id
-                WHERE m.match_date::date >= date_trunc('month', CURRENT_DATE) - INTERVAL '1 month'
-                  AND m.match_date::date < date_trunc('month', CURRENT_DATE)
-            ),
-            avgs AS (
-                SELECT voted_player_id, AVG(rating) AS media
-                FROM month_votes
-                GROUP BY voted_player_id
-            )
-            SELECT voted_player_id
-            FROM avgs
-            WHERE media = (SELECT MAX(media) FROM avgs)
-            ORDER BY RANDOM()
-            LIMIT 1
-        """, fetch=True)
-
-        if rows:
-            motm_id = rows[0]["voted_player_id"]
-    except Exception:
         motm_id = None
 
     MOT_CACHE["motw_id"] = motw_id
     MOT_CACHE["motm_id"] = motm_id
-    MOT_CACHE["expires_at"] = now + 300
+    MOT_CACHE["expires_at"] = now + 900
 
     return motw_id, motm_id
+
 
 
 
@@ -1096,6 +1140,15 @@ def player_votes(match_id):
             return redirect(url_for("player_votes", match_id=match_id))
 
         clear_runtime_caches()
+        try:
+            rebuild_awards_cache()
+        except Exception:
+            pass
+        try:
+            rebuild_awards_cache()
+        except Exception:
+            pass
+        clear_runtime_caches()
         flash(f"Voti salvati: {saved}. Non potrai più modificarli per questa partita.")
         return redirect(url_for("player_matches"))
 
@@ -1157,6 +1210,19 @@ def coach_panel():
     """
     return page("Allenatore", "Gestione rapida da telefono", content)
 
+
+
+
+@app.route("/coach/refresh-awards")
+@login_required("coach")
+def coach_refresh_awards():
+    try:
+        rebuild_awards_cache()
+        clear_runtime_caches()
+        flash("MOTW/MOTM aggiornati.")
+    except Exception as exc:
+        flash(f"Errore aggiornamento MOTW/MOTM: {exc}")
+    return redirect(url_for("coach_home"))
 
 
 @app.route("/coach/player-stats")

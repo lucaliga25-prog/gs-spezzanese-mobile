@@ -351,13 +351,21 @@ def player_home():
         encoded = base64.b64encode(data).decode("utf-8")
         mime = photo.mimetype or "image/jpeg"
 
+        # Sostituisce completamente la vecchia immagine profilo.
+        db_query("""
+            UPDATE players
+            SET photo_data='',
+                photo_mime=''
+            WHERE id=?
+        """, (voter_id,))
+
         db_query("""
             UPDATE players
             SET photo_data=?, photo_mime=?
             WHERE id=?
         """, (encoded, mime, voter_id))
 
-        flash("Foto figurina salvata correttamente.")
+        flash("Foto figurina aggiornata correttamente.")
         return redirect(url_for("player_home"))
 
     content = """

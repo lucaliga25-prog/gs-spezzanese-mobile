@@ -1,14 +1,12 @@
 from pathlib import Path
 import os
 import base64
-from io import BytesIO
 import psycopg2
 from psycopg2.pool import SimpleConnectionPool
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from datetime import date
 from functools import wraps
-from PIL import Image, ImageOps
 
 from flask import Flask, request, redirect, url_for, session, flash, get_flashed_messages
 
@@ -447,27 +445,12 @@ def player_home():
 
         data = photo.read()
 
-        # Le foto da iPhone/Android possono essere molto grandi:
-        # le comprimiamo automaticamente prima di salvarle.
-        try:
-            img = Image.open(BytesIO(data))
-            img = ImageOps.exif_transpose(img).convert("RGB")
-            img.thumbnail((900, 900))
-
-            output = BytesIO()
-            img.save(output, format="JPEG", quality=78, optimize=True)
-            compressed = output.getvalue()
-        except Exception:
-            flash("Non sono riuscito a leggere la foto. Prova con un'immagine JPG o PNG.")
+        if len(data) > 2 * 1024 * 1024:
+            flash("Foto troppo grande. Usa una foto sotto i 2 MB.")
             return redirect(url_for("player_home"))
 
-        # Limite finale di sicurezza dopo compressione.
-        if len(compressed) > 2 * 1024 * 1024:
-            flash("Foto ancora troppo grande dopo la compressione. Prova con una foto diversa.")
-            return redirect(url_for("player_home"))
-
-        encoded = base64.b64encode(compressed).decode("utf-8")
-        mime = "image/jpeg"
+        encoded = base64.b64encode(data).decode("utf-8")
+        mime = photo.mimetype or "image/jpeg"
 
         # Sostituisce completamente la vecchia immagine profilo.
         db_query("""

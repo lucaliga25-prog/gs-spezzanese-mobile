@@ -407,11 +407,12 @@ def player_votes(match_id):
 
     match = match_rows[0]
 
-    already_voted = db_query("""
-        SELECT COUNT(*)
+    already_voted_row = db_query("""
+        SELECT COUNT(*) AS total
         FROM player_votes
         WHERE match_id=? AND voter_player_id=?
-    """, (match_id, voter_id), fetch=True)[0][0]
+    """, (match_id, voter_id), fetch=True)[0]
+    already_voted = already_voted_row["total"]
 
     if already_voted:
         content = f"""

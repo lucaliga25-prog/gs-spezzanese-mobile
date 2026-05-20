@@ -126,6 +126,14 @@ def ensure_db():
             cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS photo_mime TEXT DEFAULT ''")
             cur.execute("ALTER TABLE player_votes ALTER COLUMN rating TYPE NUMERIC(4,2) USING rating::numeric")
 
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_appearances_player_match ON appearances(player_id, match_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_appearances_match ON appearances(match_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_matches_date ON matches(match_date)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_votes_voted_match ON player_votes(voted_player_id, match_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_votes_voter_match ON player_votes(voter_player_id, match_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_training_attendance_player_session ON training_attendance(player_id, session_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_training_sessions_date ON training_sessions(training_date)")
+
             for table in ["players", "matches", "appearances", "substitutions", "training_sessions", "training_attendance", "player_votes"]:
                 seq = f"{table}_id_seq"
                 cur.execute(f"CREATE SEQUENCE IF NOT EXISTS {seq}")
@@ -589,14 +597,18 @@ def player_history():
             COALESCE(a.assists, 0) AS assists,
             COALESCE(a.yellow_cards, 0) AS yellow_cards,
             COALESCE(a.red_cards, 0) AS red_cards,
-            COALESCE((
-                SELECT ROUND(AVG(v.rating)::numeric, 2)
-                FROM player_votes v
-                WHERE v.match_id=m.id
-                  AND v.voted_player_id=?
-            ), 0) AS media_voto
+            COALESCE(v.media_voto, 0) AS media_voto
         FROM appearances a
         JOIN matches m ON m.id=a.match_id
+        LEFT JOIN (
+            SELECT
+                match_id,
+                voted_player_id,
+                ROUND(AVG(rating)::numeric, 2) AS media_voto
+            FROM player_votes
+            WHERE voted_player_id=?
+            GROUP BY match_id, voted_player_id
+        ) v ON v.match_id=m.id AND v.voted_player_id=a.player_id
         WHERE a.player_id=?
           AND m.match_date BETWEEN ? AND ?
         ORDER BY m.match_date DESC, m.id DESC
@@ -1194,4 +1206,4 @@ def coach_training():
 
 if __name__ == "__main__":
     ensure_mobile_tables()
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=False)

@@ -1,12 +1,14 @@
 from pathlib import Path
 import os
 import base64
+from io import BytesIO
 import psycopg2
 from psycopg2.pool import SimpleConnectionPool
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from datetime import date
 from functools import wraps
+from PIL import Image, ImageOps
 
 from flask import Flask, request, redirect, url_for, session, flash, get_flashed_messages
 
@@ -373,6 +375,61 @@ BASE_STYLE = """
     font-size:12px;
     border-radius:10px;
 }
+.special-card-motw{
+    background:linear-gradient(135deg,#020617,#111827,#000000);
+    border:3px solid #facc15;
+    box-shadow:0 14px 32px rgba(250,204,21,.32);
+    color:#fde68a;
+}
+.special-card-motm{
+    background:linear-gradient(135deg,#991b1b,#1d4ed8,#7f1d1d);
+    border:3px solid #60a5fa;
+    box-shadow:0 14px 32px rgba(37,99,235,.32);
+    color:#eff6ff;
+}
+.special-badge{
+    display:inline-block;
+    padding:8px 16px;
+    border-radius:999px;
+    font-size:18px;
+    font-weight:900;
+    margin-bottom:10px;
+    letter-spacing:.5px;
+}
+.special-badge-motw{
+    color:#facc15;
+    background:#111827;
+    border:2px solid #facc15;
+}
+.special-badge-motm{
+    color:#dbeafe;
+    background:#7f1d1d;
+    border:2px solid #93c5fd;
+}
+.special-card-motw .card-name,
+.special-card-motw .stat-value{
+    color:#facc15;
+}
+.special-card-motw .card-role,
+.special-card-motw .stat-label{
+    color:#fde68a;
+}
+.special-card-motm .card-name,
+.special-card-motm .stat-value{
+    color:#eff6ff;
+}
+.special-card-motm .card-role,
+.special-card-motm .stat-label{
+    color:#bfdbfe;
+}
+.special-card-motw .stat-box{
+    background:#1a1a1a;
+    border-color:#facc15;
+}
+.special-card-motm .stat-box{
+    background:#1e3a8a;
+    border-color:#93c5fd;
+}
 </style>
 """
 
@@ -445,12 +502,42 @@ def player_home():
 
         data = photo.read()
 
-        if len(data) > 2 * 1024 * 1024:
-            flash("Foto troppo grande. Usa una foto sotto i 2 MB.")
-            return redirect(url_for("player_home"))
+        # Le foto da telefono vengono ridimensionate e compresse automaticamente.
+        # Il controllo viene fatto sul Base64 finale, perché nel database occupa più spazio del file originale.
+        try:
+            img = Image.open(BytesIO(data))
+            img = ImageOps.exif_transpose(img).convert("RGB")
 
-        encoded = base64.b64encode(data).decode("utf-8")
-        mime = photo.mimetype or "image/jpeg"
+            max_base64_size = 3 * 1024 * 1024
+            encoded = None
+            compressed = None
+
+            for max_side in [900, 800, 700, 600, 500]:
+                temp_img = img.copy()
+                temp_img.thumbnail((max_side, max_side))
+
+                for quality in [78, 72, 66, 60, 54, 48]:
+                    output = BytesIO()
+                    temp_img.save(output, format="JPEG", quality=quality, optimize=True)
+                    compressed = output.getvalue()
+                    test_encoded = base64.b64encode(compressed).decode("utf-8")
+
+                    if len(test_encoded.encode("utf-8")) <= max_base64_size:
+                        encoded = test_encoded
+                        break
+
+                if encoded is not None:
+                    break
+
+            if encoded is None:
+                flash("Foto troppo grande. Prova a ritagliarla o sceglierne una diversa.")
+                return redirect(url_for("player_home"))
+
+            mime = "image/jpeg"
+
+        except Exception:
+            flash("Non sono riuscito a leggere la foto. Prova con un'immagine JPG o PNG.")
+            return redirect(url_for("player_home"))
 
         # Sostituisce completamente la vecchia immagine profilo.
         db_query("""
@@ -520,6 +607,56 @@ def parse_vote(value):
 
 
 
+
+def get_motw_motm_ids():
+    """Calcola MOTW e MOTM in modo leggero."""
+    motw_id = None
+    motm_id = None
+
+    try:
+        rows = db_query("""
+            SELECT v.voted_player_id, AVG(v.rating) AS avg_rating, COUNT(v.id) AS votes_count
+            FROM player_votes v
+            WHERE v.match_id = (
+                SELECT m.id
+                FROM matches m
+                JOIN player_votes pv ON pv.match_id=m.id
+                GROUP BY m.id, m.match_date
+                ORDER BY m.match_date DESC, m.id DESC
+                LIMIT 1
+            )
+            GROUP BY v.voted_player_id
+            HAVING COUNT(v.id) > 0
+            ORDER BY AVG(v.rating) DESC, COUNT(v.id) DESC
+            LIMIT 1
+        """, fetch=True)
+
+        if rows:
+            motw_id = rows[0]["voted_player_id"]
+    except Exception:
+        motw_id = None
+
+    try:
+        rows = db_query("""
+            SELECT v.voted_player_id, AVG(v.rating) AS avg_rating, COUNT(v.id) AS votes_count
+            FROM player_votes v
+            JOIN matches m ON m.id=v.match_id
+            WHERE m.match_date::date >= date_trunc('month', CURRENT_DATE) - INTERVAL '1 month'
+              AND m.match_date::date < date_trunc('month', CURRENT_DATE)
+            GROUP BY v.voted_player_id
+            HAVING COUNT(v.id) > 0
+            ORDER BY AVG(v.rating) DESC, COUNT(v.id) DESC
+            LIMIT 1
+        """, fetch=True)
+
+        if rows:
+            motm_id = rows[0]["voted_player_id"]
+    except Exception:
+        motm_id = None
+
+    return motw_id, motm_id
+
+
 @app.route("/player/card")
 @login_required("player")
 def player_card():
@@ -551,13 +688,26 @@ def player_card():
     p = rows[0]
     full_name = f"{p['last_name']} {p['first_name']}".strip()
 
+    motw_id, motm_id = get_motw_motm_ids()
+
+    special_class = ""
+    badge_html = ""
+
+    if player_id == motw_id:
+        special_class = "special-card-motw"
+        badge_html = "<div class='special-badge special-badge-motw'>⚡ MOTW ⚡</div>"
+    elif player_id == motm_id:
+        special_class = "special-card-motm"
+        badge_html = "<div class='special-badge special-badge-motm'>🔥 MOTM 🔥</div>"
+
     if p["photo_data"]:
         photo_html = f"<img class='card-photo' src='data:{p['photo_mime']};base64,{p['photo_data']}' alt='Foto giocatore'>"
     else:
         photo_html = "<div class='card-placeholder'>👤</div>"
 
     content = f"""
-    <div class="card card-preview">
+    <div class="card card-preview {special_class}">
+        {badge_html}
         {photo_html}
         <div class="card-name">{full_name}</div>
         <div class="card-role">{p['role'] or '-'}</div>
@@ -586,126 +736,6 @@ def player_card():
     """
 
     return page("La mia figurina", f"Ciao {session.get('player_name')}", content)
-
-
-
-@app.route("/player/history")
-@login_required("player")
-def player_history():
-    player_id = session["player_id"]
-
-    start_date = request.args.get("start_date", "").strip()
-    end_date = request.args.get("end_date", "").strip()
-
-    start_filter = start_date if start_date else "1900-01-01"
-    end_filter = end_date if end_date else "2999-12-31"
-
-    rows = db_query("""
-        SELECT
-            m.id AS match_id,
-            m.match_date,
-            m.opponent,
-            m.competition,
-            m.home_away,
-            COALESCE(m.result, '') AS result,
-            COALESCE(a.starter, 0) AS starter,
-            COALESCE(a.minutes, 0) AS minutes,
-            COALESCE(a.goals, 0) AS goals,
-            COALESCE(a.assists, 0) AS assists,
-            COALESCE(a.yellow_cards, 0) AS yellow_cards,
-            COALESCE(a.red_cards, 0) AS red_cards,
-            COALESCE(v.media_voto, 0) AS media_voto
-        FROM appearances a
-        JOIN matches m ON m.id=a.match_id
-        LEFT JOIN (
-            SELECT
-                match_id,
-                voted_player_id,
-                ROUND(AVG(rating)::numeric, 2) AS media_voto
-            FROM player_votes
-            WHERE voted_player_id=?
-            GROUP BY match_id, voted_player_id
-        ) v ON v.match_id=m.id AND v.voted_player_id=a.player_id
-        WHERE a.player_id=?
-          AND m.match_date BETWEEN ? AND ?
-        ORDER BY m.match_date DESC, m.id DESC
-    """, (player_id, player_id, start_filter, end_filter), fetch=True)
-
-    if not rows:
-        cards = """
-        <div class="card">
-            Nessuna prestazione trovata per il periodo selezionato.
-        </div>
-        """
-    else:
-        cards = ""
-
-        for r in rows:
-            titolare = "Titolare" if int(r["starter"] or 0) == 1 else "Panchina/Subentrato"
-
-            cards += f"""
-            <div class="performance-card">
-                <div class="performance-title">{ui_date(r['match_date'])} · {r['opponent']}</div>
-                <div class="performance-meta">{r['competition']} · {r['home_away']} · Risultato: {r['result'] or '-'} · {titolare}</div>
-
-                <div class="performance-grid">
-                    <div class="performance-stat">
-                        <div class="performance-value">{r['minutes']}</div>
-                        <div class="performance-label">Min</div>
-                    </div>
-                    <div class="performance-stat">
-                        <div class="performance-value">{r['goals']}</div>
-                        <div class="performance-label">Gol</div>
-                    </div>
-                    <div class="performance-stat">
-                        <div class="performance-value">{r['assists']}</div>
-                        <div class="performance-label">Assist</div>
-                    </div>
-                    <div class="performance-stat">
-                        <div class="performance-value">{r['yellow_cards']}</div>
-                        <div class="performance-label">Gialli</div>
-                    </div>
-                    <div class="performance-stat">
-                        <div class="performance-value">{r['red_cards']}</div>
-                        <div class="performance-label">Rossi</div>
-                    </div>
-                    <div class="performance-stat">
-                        <div class="performance-value">{r['media_voto']}</div>
-                        <div class="performance-label">Voto</div>
-                    </div>
-                </div>
-            </div>
-            """
-
-    today = date.today().isoformat()
-
-    content = f"""
-    <div class="card">
-        <h2>Storico prestazioni</h2>
-        <div class="small">Qui vedi solo le tue partite giocate.</div>
-
-        <form method="get">
-            <div class="inline">
-                <div>
-                    <label>Dal</label>
-                    <input type="date" name="start_date" value="{start_date}">
-                </div>
-                <div>
-                    <label>Al</label>
-                    <input type="date" name="end_date" value="{end_date or today}">
-                </div>
-            </div>
-            <button class="btn-blue">Filtra periodo</button>
-            <a class="btn btn-dark" href="/player/history">Azzera filtro</a>
-        </form>
-    </div>
-
-    {cards}
-
-    <a class="btn btn-blue" href="/player">Area giocatore</a>
-    """
-
-    return page("Storico prestazioni", f"Ciao {session.get('player_name')}", content)
 
 
 @app.route("/player/matches")

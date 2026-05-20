@@ -1,7 +1,6 @@
 from pathlib import Path
 import os
 import base64
-from io import BytesIO
 import psycopg2
 from psycopg2.pool import SimpleConnectionPool
 from psycopg2.extras import RealDictCursor
@@ -9,12 +8,7 @@ from dotenv import load_dotenv
 from datetime import date
 from functools import wraps
 
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-
-from flask import Flask, request, redirect, url_for, session, render_template_string, flash, get_flashed_messages, send_file
+from flask import Flask, request, redirect, url_for, session, render_template_string, flash, get_flashed_messages
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -796,7 +790,6 @@ def coach_player_stats():
     <div class="card">
         <h2>Statistiche giocatori</h2>
         <div class="small">Classifica ordinata per minuti giocati.</div>
-        <a class="btn btn-green" href="/coach/player-stats/pdf">Scarica PDF statistiche</a>
     </div>
 
     <div class="card">
@@ -828,114 +821,6 @@ def coach_player_stats():
     """
 
     return page("Statistiche giocatori", "Area allenatore", content)
-
-
-
-@app.route("/coach/player-stats/pdf")
-@login_required("coach")
-def coach_player_stats_pdf():
-    rows = db_query("""
-        SELECT
-            trim(p.last_name || ' ' || p.first_name) AS player_name,
-            COALESCE(p.role, '') AS role,
-            COUNT(a.id) AS presenze,
-            COALESCE(SUM(a.starter), 0) AS titolare,
-            COALESCE((
-                SELECT COUNT(*)
-                FROM substitutions s
-                WHERE s.player_in_id=p.id
-            ), 0) AS subentrato,
-            COALESCE((
-                SELECT COUNT(*)
-                FROM substitutions s
-                WHERE s.player_out_id=p.id
-            ), 0) AS sostituito,
-            COALESCE(SUM(a.minutes), 0) AS minuti,
-            COALESCE(SUM(a.goals), 0) AS gol,
-            COALESCE(SUM(a.assists), 0) AS assist,
-            COALESCE(SUM(a.yellow_cards), 0) AS ammonizioni,
-            COALESCE(SUM(a.red_cards), 0) AS espulsioni,
-            COALESCE(ROUND(AVG(v.rating)::numeric, 2), 0) AS media_voto
-        FROM players p
-        LEFT JOIN appearances a ON a.player_id=p.id
-        LEFT JOIN player_votes v ON v.voted_player_id=p.id
-        GROUP BY p.id, p.last_name, p.first_name, p.role
-        ORDER BY COALESCE(SUM(a.minutes),0) DESC, p.last_name, p.first_name
-    """, fetch=True)
-
-    buffer = BytesIO()
-
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=landscape(A4),
-        rightMargin=22,
-        leftMargin=22,
-        topMargin=22,
-        bottomMargin=22,
-    )
-
-    styles = getSampleStyleSheet()
-    story = []
-
-    story.append(Paragraph("Gestionale GS Spezzanese 26/27", styles["Title"]))
-    story.append(Paragraph("Statistiche giocatori", styles["Heading2"]))
-    story.append(Spacer(1, 12))
-
-    data = [[
-        "Giocatore", "Ruolo", "Pres", "Tit", "Sub", "Sost",
-        "Min", "Gol", "Ast", "Amm", "Esp", "Voto"
-    ]]
-
-    for r in rows:
-        data.append([
-            r["player_name"],
-            r["role"] or "-",
-            r["presenze"],
-            r["titolare"],
-            r["subentrato"],
-            r["sostituito"],
-            r["minuti"],
-            r["gol"],
-            r["assist"],
-            r["ammonizioni"],
-            r["espulsioni"],
-            r["media_voto"],
-        ])
-
-    if len(data) == 1:
-        data.append(["Nessun giocatore", "-", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-
-    table = Table(
-        data,
-        repeatRows=1,
-        colWidths=[145, 45, 42, 42, 42, 42, 50, 42, 42, 42, 42, 48]
-    )
-
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#07152f")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, 0), 8),
-        ("FONTSIZE", (0, 1), (-1, -1), 7),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cbd5e1")),
-        ("ALIGN", (2, 1), (-1, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
-        ("BOTTOMPADDING", (0, 0), (-1, 0), 7),
-        ("TOPPADDING", (0, 0), (-1, 0), 7),
-    ]))
-
-    story.append(table)
-    doc.build(story)
-
-    buffer.seek(0)
-
-    return send_file(
-        buffer,
-        as_attachment=True,
-        download_name="statistiche_giocatori_gs_spezzanese.pdf",
-        mimetype="application/pdf"
-    )
 
 
 @app.route("/coach/matches", methods=["GET", "POST"])

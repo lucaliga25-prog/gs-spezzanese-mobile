@@ -734,40 +734,140 @@ def coach_panel():
 @app.route("/coach/player-stats")
 @login_required("coach")
 def coach_player_stats():
-    rows = db_query("""
+    start_date = request.args.get("start_date", "").strip()
+    end_date = request.args.get("end_date", "").strip()
+
+    where_match = ""
+    match_params = []
+
+    where_training = ""
+    training_params = []
+
+    where_votes = ""
+    votes_params = []
+
+    if start_date and end_date:
+        where_match = "AND m.match_date BETWEEN ? AND ?"
+        match_params = [start_date, end_date]
+
+        where_training = "AND ts.training_date BETWEEN ? AND ?"
+        training_params = [start_date, end_date]
+
+        where_votes = "AND mv.match_date BETWEEN ? AND ?"
+        votes_params = [start_date, end_date]
+    elif start_date:
+        where_match = "AND m.match_date >= ?"
+        match_params = [start_date]
+
+        where_training = "AND ts.training_date >= ?"
+        training_params = [start_date]
+
+        where_votes = "AND mv.match_date >= ?"
+        votes_params = [start_date]
+    elif end_date:
+        where_match = "AND m.match_date <= ?"
+        match_params = [end_date]
+
+        where_training = "AND ts.training_date <= ?"
+        training_params = [end_date]
+
+        where_votes = "AND mv.match_date <= ?"
+        votes_params = [end_date]
+
+    query = f"""
         SELECT
             p.id,
             trim(p.last_name || ' ' || p.first_name) AS player_name,
             COALESCE(p.role, '') AS role,
-            COUNT(a.id) AS presenze,
-            COALESCE(SUM(a.starter), 0) AS titolare,
+            COALESCE((
+                SELECT COUNT(*)
+                FROM appearances a
+                JOIN matches m ON m.id=a.match_id
+                WHERE a.player_id=p.id
+                {where_match}
+            ), 0) AS presenze,
+            COALESCE((
+                SELECT SUM(CASE WHEN a.starter=1 THEN 1 ELSE 0 END)
+                FROM appearances a
+                JOIN matches m ON m.id=a.match_id
+                WHERE a.player_id=p.id
+                {where_match}
+            ), 0) AS titolare,
             COALESCE((
                 SELECT COUNT(*)
                 FROM substitutions s
+                JOIN matches m ON m.id=s.match_id
                 WHERE s.player_in_id=p.id
+                {where_match}
             ), 0) AS subentrato,
             COALESCE((
                 SELECT COUNT(*)
                 FROM substitutions s
+                JOIN matches m ON m.id=s.match_id
                 WHERE s.player_out_id=p.id
+                {where_match}
             ), 0) AS sostituito,
-            COALESCE(SUM(a.minutes), 0) AS minuti,
-            COALESCE(SUM(a.goals), 0) AS gol,
-            COALESCE(SUM(a.assists), 0) AS assist,
-            COALESCE(SUM(a.yellow_cards), 0) AS ammonizioni,
-            COALESCE(SUM(a.red_cards), 0) AS espulsioni,
+            COALESCE((
+                SELECT SUM(a.minutes)
+                FROM appearances a
+                JOIN matches m ON m.id=a.match_id
+                WHERE a.player_id=p.id
+                {where_match}
+            ), 0) AS minuti,
+            COALESCE((
+                SELECT SUM(a.goals)
+                FROM appearances a
+                JOIN matches m ON m.id=a.match_id
+                WHERE a.player_id=p.id
+                {where_match}
+            ), 0) AS gol,
+            COALESCE((
+                SELECT SUM(a.assists)
+                FROM appearances a
+                JOIN matches m ON m.id=a.match_id
+                WHERE a.player_id=p.id
+                {where_match}
+            ), 0) AS assist,
+            COALESCE((
+                SELECT SUM(a.yellow_cards)
+                FROM appearances a
+                JOIN matches m ON m.id=a.match_id
+                WHERE a.player_id=p.id
+                {where_match}
+            ), 0) AS ammonizioni,
+            COALESCE((
+                SELECT SUM(a.red_cards)
+                FROM appearances a
+                JOIN matches m ON m.id=a.match_id
+                WHERE a.player_id=p.id
+                {where_match}
+            ), 0) AS espulsioni,
             COALESCE((
                 SELECT SUM(CASE WHEN ta.present=1 THEN 1 ELSE 0 END)
                 FROM training_attendance ta
+                JOIN training_sessions ts ON ts.id=ta.session_id
                 WHERE ta.player_id=p.id
+                {where_training}
             ), 0) AS all_presenti,
-            COALESCE(ROUND(AVG(v.rating)::numeric, 2), 0) AS media_voto
+            COALESCE((
+                SELECT ROUND(AVG(v.rating)::numeric, 2)
+                FROM player_votes v
+                JOIN matches mv ON mv.id=v.match_id
+                WHERE v.voted_player_id=p.id
+                {where_votes}
+            ), 0) AS media_voto
         FROM players p
-        LEFT JOIN appearances a ON a.player_id=p.id
-        LEFT JOIN player_votes v ON v.voted_player_id=p.id
-        GROUP BY p.id, p.last_name, p.first_name, p.role
-        ORDER BY COALESCE(SUM(a.minutes),0) DESC, p.last_name, p.first_name
-    """, fetch=True)
+        ORDER BY minuti DESC, p.last_name, p.first_name
+    """
+
+    # La stessa condizione partite compare 8 volte nella query.
+    params = []
+    for _ in range(8):
+        params.extend(match_params)
+    params.extend(training_params)
+    params.extend(votes_params)
+
+    rows = db_query(query, tuple(params), fetch=True)
 
     table_rows = ""
 
@@ -790,12 +890,29 @@ def coach_player_stats():
         """
 
     if not table_rows:
-        table_rows = "<tr><td colspan='11'>Nessun giocatore presente.</td></tr>"
+        table_rows = "<tr><td colspan='12'>Nessun giocatore presente.</td></tr>"
+
+    today = date.today().isoformat()
 
     content = f"""
     <div class="card">
         <h2>Statistiche giocatori</h2>
-        <div class="small">Classifica ordinata per minuti giocati. Include anche le presenze agli allenamenti.</div>
+        <div class="small">Filtra le statistiche per periodo. Include anche le presenze agli allenamenti.</div>
+
+        <form method="get">
+            <div class="inline">
+                <div>
+                    <label>Dal</label>
+                    <input type="date" name="start_date" value="{start_date}">
+                </div>
+                <div>
+                    <label>Al</label>
+                    <input type="date" name="end_date" value="{end_date or today}">
+                </div>
+            </div>
+            <button class="btn-blue">Filtra periodo</button>
+            <a class="btn btn-dark" href="/coach/player-stats">Azzera filtro</a>
+        </form>
     </div>
 
     <div class="card">

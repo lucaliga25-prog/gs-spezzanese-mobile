@@ -217,6 +217,65 @@ def login_required(kind=None):
 BASE_STYLE = """
 <style>
 :root{--blue:#07152f;--red:#dc2626;--green:#16a34a;--bg:#f6f8fc;--card:#fff;--text:#111827;--muted:#64748b;--border:#dbe3ef}*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:var(--bg);color:var(--text)}.header{background:linear-gradient(135deg,var(--blue),#0b63f6);color:white;padding:22px 18px 28px;border-bottom-left-radius:24px;border-bottom-right-radius:24px}.header h1{margin:0;font-size:24px}.header p{margin:6px 0 0;opacity:.85;font-size:14px}.container{padding:16px;max-width:820px;margin:auto}.card{background:var(--card);border:1px solid var(--border);border-radius:18px;padding:16px;margin-bottom:14px;box-shadow:0 8px 20px rgba(15,23,42,.06)}h2{font-size:19px;margin:0 0 12px}label{display:block;font-weight:700;color:var(--muted);font-size:13px;margin:10px 0 5px}input,select{width:100%;height:42px;border:1px solid var(--border);border-radius:12px;padding:0 12px;font-size:16px;background:white}button,.btn{display:block;width:100%;border:0;border-radius:13px;padding:12px 14px;background:var(--red);color:white;font-weight:800;font-size:15px;text-decoration:none;text-align:center;margin-top:12px}.btn-blue{background:#0b63f6}.btn-green{background:var(--green)}.btn-dark{background:var(--blue)}.row{display:grid;grid-template-columns:1fr 90px;gap:10px;align-items:center}.player-row{border:1px solid var(--border);border-radius:14px;padding:12px;margin:8px 0;background:#fff}.player-title{font-weight:800}.small{color:var(--muted);font-size:12px}.tabs{display:grid;grid-template-columns:1fr 1fr;gap:10px}.flash{background:#fee2e2;color:#991b1b;border:1px solid #fecaca;border-radius:12px;padding:10px;margin-bottom:12px;font-weight:700}.inline{display:grid;grid-template-columns:1fr 1fr;gap:8px}.checks{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}.checks label{margin:0;padding:10px;background:#f8fafc;border:1px solid var(--border);border-radius:12px;color:var(--text)}.checks input{width:auto;height:auto;margin-right:8px}.footer-space{height:30px}
+.card-preview{
+    text-align:center;
+    background:linear-gradient(180deg,#ffffff,#f8fafc);
+}
+.card-photo{
+    width:160px;
+    height:160px;
+    object-fit:cover;
+    border-radius:28px;
+    border:4px solid #e5e7eb;
+    box-shadow:0 10px 24px rgba(15,23,42,.14);
+    background:#e5e7eb;
+}
+.card-placeholder{
+    width:160px;
+    height:160px;
+    border-radius:28px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    margin:0 auto;
+    background:#e5e7eb;
+    font-size:62px;
+    color:#64748b;
+    border:4px solid #e5e7eb;
+}
+.card-name{
+    font-size:24px;
+    font-weight:900;
+    margin-top:14px;
+}
+.card-role{
+    color:#0b63f6;
+    font-weight:900;
+    margin-top:4px;
+}
+.stats-grid{
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:8px;
+    margin-top:16px;
+}
+.stat-box{
+    background:#f8fafc;
+    border:1px solid #dbe3ef;
+    border-radius:14px;
+    padding:10px 6px;
+}
+.stat-value{
+    font-size:20px;
+    font-weight:900;
+    color:#111827;
+}
+.stat-label{
+    font-size:11px;
+    color:#64748b;
+    font-weight:800;
+    margin-top:2px;
+}
 </style>
 """
 
@@ -315,6 +374,7 @@ def player_home():
     <div class="card">
         <h2>Voti partita</h2>
         <a class="btn btn-blue" href="/player/matches">Scegli partita da votare</a>
+        <a class="btn btn-green" href="/player/card">Visualizza la mia figurina</a>
         <a class="btn" href="/logout">Esci</a>
     </div>
     """
@@ -347,6 +407,75 @@ def parse_vote(value):
         return None
 
     return rating
+
+
+
+@app.route("/player/card")
+@login_required("player")
+def player_card():
+    player_id = session["player_id"]
+
+    rows = db_query("""
+        SELECT
+            p.id,
+            p.first_name,
+            p.last_name,
+            COALESCE(p.role, '') AS role,
+            COALESCE(p.photo_data, '') AS photo_data,
+            COALESCE(p.photo_mime, 'image/jpeg') AS photo_mime,
+            COUNT(a.id) AS presenze,
+            COALESCE(SUM(a.goals), 0) AS gol,
+            COALESCE(SUM(a.assists), 0) AS assist,
+            COALESCE(ROUND(AVG(v.rating)::numeric, 2), 0) AS media_voto
+        FROM players p
+        LEFT JOIN appearances a ON a.player_id=p.id
+        LEFT JOIN player_votes v ON v.voted_player_id=p.id
+        WHERE p.id=?
+        GROUP BY p.id, p.first_name, p.last_name, p.role, p.photo_data, p.photo_mime
+    """, (player_id,), fetch=True)
+
+    if not rows:
+        flash("Giocatore non trovato.")
+        return redirect(url_for("player_home"))
+
+    p = rows[0]
+    full_name = f"{p['last_name']} {p['first_name']}".strip()
+
+    if p["photo_data"]:
+        photo_html = f"<img class='card-photo' src='data:{p['photo_mime']};base64,{p['photo_data']}' alt='Foto giocatore'>"
+    else:
+        photo_html = "<div class='card-placeholder'>👤</div>"
+
+    content = f"""
+    <div class="card card-preview">
+        {photo_html}
+        <div class="card-name">{full_name}</div>
+        <div class="card-role">{p['role'] or '-'}</div>
+
+        <div class="stats-grid">
+            <div class="stat-box">
+                <div class="stat-value">{p['presenze']}</div>
+                <div class="stat-label">Partite</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{p['gol']}</div>
+                <div class="stat-label">Gol</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{p['assist']}</div>
+                <div class="stat-label">Assist</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value">{p['media_voto']}</div>
+                <div class="stat-label">Voto</div>
+            </div>
+        </div>
+    </div>
+
+    <a class="btn btn-blue" href="/player">Area giocatore</a>
+    """
+
+    return page("La mia figurina", f"Ciao {session.get('player_name')}", content)
 
 
 @app.route("/player/matches")

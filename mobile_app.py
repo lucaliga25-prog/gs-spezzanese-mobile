@@ -459,6 +459,7 @@ def player_home():
         <h2>Voti partita</h2>
         <a class="btn btn-blue" href="/player/matches">Scegli partita da votare</a>
         <a class="btn btn-green" href="/player/card">Visualizza la mia figurina</a>
+        <a class="btn btn-dark" href="/player/history">Storico prestazioni</a>
         <a class="btn" href="/logout">Esci</a>
     </div>
     """
@@ -560,6 +561,122 @@ def player_card():
     """
 
     return page("La mia figurina", f"Ciao {session.get('player_name')}", content)
+
+
+
+@app.route("/player/history")
+@login_required("player")
+def player_history():
+    player_id = session["player_id"]
+
+    start_date = request.args.get("start_date", "").strip()
+    end_date = request.args.get("end_date", "").strip()
+
+    start_filter = start_date if start_date else "1900-01-01"
+    end_filter = end_date if end_date else "2999-12-31"
+
+    rows = db_query("""
+        SELECT
+            m.id AS match_id,
+            m.match_date,
+            m.opponent,
+            m.competition,
+            m.home_away,
+            COALESCE(m.result, '') AS result,
+            COALESCE(a.starter, 0) AS starter,
+            COALESCE(a.minutes, 0) AS minutes,
+            COALESCE(a.goals, 0) AS goals,
+            COALESCE(a.assists, 0) AS assists,
+            COALESCE(a.yellow_cards, 0) AS yellow_cards,
+            COALESCE(a.red_cards, 0) AS red_cards,
+            COALESCE((
+                SELECT ROUND(AVG(v.rating)::numeric, 2)
+                FROM player_votes v
+                WHERE v.match_id=m.id
+                  AND v.voted_player_id=?
+            ), 0) AS media_voto
+        FROM appearances a
+        JOIN matches m ON m.id=a.match_id
+        WHERE a.player_id=?
+          AND m.match_date BETWEEN ? AND ?
+        ORDER BY m.match_date DESC, m.id DESC
+    """, (player_id, player_id, start_filter, end_filter), fetch=True)
+
+    if not rows:
+        cards = """
+        <div class="card">
+            Nessuna prestazione trovata per il periodo selezionato.
+        </div>
+        """
+    else:
+        cards = ""
+
+        for r in rows:
+            titolare = "Titolare" if int(r["starter"] or 0) == 1 else "Panchina/Subentrato"
+
+            cards += f"""
+            <div class="performance-card">
+                <div class="performance-title">{ui_date(r['match_date'])} · {r['opponent']}</div>
+                <div class="performance-meta">{r['competition']} · {r['home_away']} · Risultato: {r['result'] or '-'} · {titolare}</div>
+
+                <div class="performance-grid">
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['minutes']}</div>
+                        <div class="performance-label">Min</div>
+                    </div>
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['goals']}</div>
+                        <div class="performance-label">Gol</div>
+                    </div>
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['assists']}</div>
+                        <div class="performance-label">Assist</div>
+                    </div>
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['yellow_cards']}</div>
+                        <div class="performance-label">Gialli</div>
+                    </div>
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['red_cards']}</div>
+                        <div class="performance-label">Rossi</div>
+                    </div>
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['media_voto']}</div>
+                        <div class="performance-label">Voto</div>
+                    </div>
+                </div>
+            </div>
+            """
+
+    today = date.today().isoformat()
+
+    content = f"""
+    <div class="card">
+        <h2>Storico prestazioni</h2>
+        <div class="small">Qui vedi solo le tue partite giocate.</div>
+
+        <form method="get">
+            <div class="inline">
+                <div>
+                    <label>Dal</label>
+                    <input type="date" name="start_date" value="{start_date}">
+                </div>
+                <div>
+                    <label>Al</label>
+                    <input type="date" name="end_date" value="{end_date or today}">
+                </div>
+            </div>
+            <button class="btn-blue">Filtra periodo</button>
+            <a class="btn btn-dark" href="/player/history">Azzera filtro</a>
+        </form>
+    </div>
+
+    {cards}
+
+    <a class="btn btn-blue" href="/player">Area giocatore</a>
+    """
+
+    return page("Storico prestazioni", f"Ciao {session.get('player_name')}", content)
 
 
 @app.route("/player/matches")
@@ -892,7 +1009,7 @@ def coach_player_stats():
             <td>{r['ammonizioni']}</td>
             <td>{r['espulsioni']}</td>
             <td>{r['all_presenti']}</td>
-            <td><b>{r['media_voto']}</b><br><a class="btn btn-blue small-btn" href="/coach/player-stats/{r['id']}">Storico prestazioni</a></td>
+            <td><b>{r['media_voto']}</b></td>
         </tr>
         """
 
@@ -951,131 +1068,6 @@ def coach_player_stats():
 
     return page("Statistiche giocatori", "Area allenatore", content)
 
-
-
-@app.route("/coach/player-stats/<int:player_id>")
-@login_required("coach")
-def coach_player_history(player_id):
-    start_date = request.args.get("start_date", "").strip()
-    end_date = request.args.get("end_date", "").strip()
-
-    start_filter = start_date if start_date else "1900-01-01"
-    end_filter = end_date if end_date else "2999-12-31"
-
-    player_rows = db_query("""
-        SELECT id, trim(last_name || ' ' || first_name) AS player_name, COALESCE(role, '') AS role
-        FROM players
-        WHERE id=?
-    """, (player_id,), fetch=True)
-
-    if not player_rows:
-        flash("Giocatore non trovato.")
-        return redirect(url_for("coach_player_stats"))
-
-    player = player_rows[0]
-
-    rows = db_query("""
-        SELECT
-            m.id AS match_id,
-            m.match_date,
-            m.opponent,
-            m.competition,
-            m.home_away,
-            COALESCE(m.result, '') AS result,
-            COALESCE(a.starter, 0) AS starter,
-            COALESCE(a.minutes, 0) AS minutes,
-            COALESCE(a.goals, 0) AS goals,
-            COALESCE(a.assists, 0) AS assists,
-            COALESCE(a.yellow_cards, 0) AS yellow_cards,
-            COALESCE(a.red_cards, 0) AS red_cards,
-            COALESCE((
-                SELECT ROUND(AVG(v.rating)::numeric, 2)
-                FROM player_votes v
-                WHERE v.match_id=m.id
-                  AND v.voted_player_id=?
-            ), 0) AS media_voto
-        FROM appearances a
-        JOIN matches m ON m.id=a.match_id
-        WHERE a.player_id=?
-          AND m.match_date BETWEEN ? AND ?
-        ORDER BY m.match_date DESC, m.id DESC
-    """, (player_id, player_id, start_filter, end_filter), fetch=True)
-
-    if not rows:
-        cards = """
-        <div class="card">
-            Nessuna prestazione trovata per il periodo selezionato.
-        </div>
-        """
-    else:
-        cards = ""
-
-        for r in rows:
-            titolare = "Titolare" if int(r["starter"] or 0) == 1 else "Panchina/Subentrato"
-            cards += f"""
-            <div class="performance-card">
-                <div class="performance-title">{ui_date(r['match_date'])} · {r['opponent']}</div>
-                <div class="performance-meta">{r['competition']} · {r['home_away']} · Risultato: {r['result'] or '-'} · {titolare}</div>
-
-                <div class="performance-grid">
-                    <div class="performance-stat">
-                        <div class="performance-value">{r['minutes']}</div>
-                        <div class="performance-label">Min</div>
-                    </div>
-                    <div class="performance-stat">
-                        <div class="performance-value">{r['goals']}</div>
-                        <div class="performance-label">Gol</div>
-                    </div>
-                    <div class="performance-stat">
-                        <div class="performance-value">{r['assists']}</div>
-                        <div class="performance-label">Assist</div>
-                    </div>
-                    <div class="performance-stat">
-                        <div class="performance-value">{r['yellow_cards']}</div>
-                        <div class="performance-label">Gialli</div>
-                    </div>
-                    <div class="performance-stat">
-                        <div class="performance-value">{r['red_cards']}</div>
-                        <div class="performance-label">Rossi</div>
-                    </div>
-                    <div class="performance-stat">
-                        <div class="performance-value">{r['media_voto']}</div>
-                        <div class="performance-label">Voto</div>
-                    </div>
-                </div>
-            </div>
-            """
-
-    today = date.today().isoformat()
-
-    content = f"""
-    <div class="card">
-        <h2>Storico prestazioni</h2>
-        <div><b>{player['player_name']}</b></div>
-        <div class="small">{player['role'] or '-'}</div>
-
-        <form method="get">
-            <div class="inline">
-                <div>
-                    <label>Dal</label>
-                    <input type="date" name="start_date" value="{start_date}">
-                </div>
-                <div>
-                    <label>Al</label>
-                    <input type="date" name="end_date" value="{end_date or today}">
-                </div>
-            </div>
-            <button class="btn-blue">Filtra periodo</button>
-            <a class="btn btn-dark" href="/coach/player-stats/{player_id}">Azzera filtro</a>
-        </form>
-    </div>
-
-    {cards}
-
-    <a class="btn btn-blue" href="/coach/player-stats">Torna alle statistiche</a>
-    """
-
-    return page("Storico prestazioni", "Area allenatore", content)
 
 
 @app.route("/coach/matches", methods=["GET", "POST"])

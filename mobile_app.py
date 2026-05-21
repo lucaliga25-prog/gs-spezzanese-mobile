@@ -1771,38 +1771,6 @@ def coach_training():
                 status_int = 0
             attendance_rows.append((session_id, pid, status_int))
 
-        captains = [row[1] for row in appearance_rows if row[9]]
-        vice_captains = [row[1] for row in appearance_rows if row[10]]
-        if len(captains) > 1:
-            flash("Puoi selezionare un solo capitano C.")
-            return redirect(url_for("coach_formation", match_id=match_id))
-        if len(vice_captains) > 1:
-            flash("Puoi selezionare un solo vice capitano VC.")
-            return redirect(url_for("coach_formation", match_id=match_id))
-        if captains and vice_captains and captains[0] == vice_captains[0]:
-            flash("Capitano C e vice VC devono essere due giocatori diversi.")
-            return redirect(url_for("coach_formation", match_id=match_id))
-
-        match_rows = db_query("SELECT home_away FROM matches WHERE id=?", (match_id,), fetch=True)
-        home_away = match_rows[0]["home_away"] if match_rows else "Casa"
-        expected_goals, result_error = parse_team_goals_from_result(result, home_away)
-        if result_error:
-            flash(result_error)
-            return redirect(url_for("coach_formation", match_id=match_id))
-
-        total_goals = sum(row[5] for row in appearance_rows)
-        total_assists = sum(row[6] for row in appearance_rows)
-
-        if total_goals != expected_goals:
-            flash(f"La somma dei gol dei giocatori è {total_goals}, ma dal risultato i gol squadra sono {expected_goals}.")
-            return redirect(url_for("coach_formation", match_id=match_id))
-
-        # Gli assist non possono essere più dei gol segnati dalla squadra.
-        # Non richiediamo assist == gol perché alcuni gol possono non avere assist.
-        if total_assists > expected_goals:
-            flash(f"La somma degli assist è {total_assists}, ma i gol squadra sono {expected_goals}. Gli assist non possono essere più dei gol segnati.")
-            return redirect(url_for("coach_formation", match_id=match_id))
-
         db_transaction(
             statements=[("DELETE FROM training_attendance WHERE session_id=?", (session_id,))],
             batches=[("INSERT INTO training_attendance (session_id,player_id,present) VALUES (?,?,?)", attendance_rows)],

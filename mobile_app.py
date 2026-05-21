@@ -168,6 +168,8 @@ def ensure_db():
 
             cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS photo_data TEXT DEFAULT ''")
             cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS photo_mime TEXT DEFAULT ''")
+            cur.execute("ALTER TABLE appearances ADD COLUMN IF NOT EXISTS captain INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE appearances ADD COLUMN IF NOT EXISTS vice_captain INTEGER DEFAULT 0")
             cur.execute("ALTER TABLE player_votes ALTER COLUMN rating TYPE NUMERIC(4,2) USING rating::numeric")
 
             cur.execute("CREATE INDEX IF NOT EXISTS idx_appearances_player_match ON appearances(player_id, match_id)")
@@ -459,6 +461,14 @@ input,select{
 }
 input:focus,select:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(201,168,76,.15)}
 select option{background:var(--green-mid)}
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus{
+  -webkit-text-fill-color:var(--text) !important;
+  caret-color:var(--text);
+  transition:background-color 9999s ease-in-out 0s;
+}
+
 
 /* ── BUTTONS ── */
 button,.btn{
@@ -1522,6 +1532,9 @@ def coach_formation():
         for player in players:
             pid = player["id"]
             starter = 1 if request.form.get(f"starter_{pid}") else 0
+            substitute = 1 if request.form.get(f"sub_{pid}") else 0
+            captain = 1 if request.form.get(f"captain_{pid}") else 0
+            vice_captain = 1 if request.form.get(f"vice_captain_{pid}") else 0
 
             try:
                 minutes = int(request.form.get(f"minutes_{pid}") or 0)
@@ -1542,16 +1555,31 @@ def coach_formation():
             has_match_data = any([
                 request.form.get(f"play_{pid}"),
                 starter,
+                substitute,
                 minutes > 0,
                 goals > 0,
                 assists > 0,
                 yellow,
                 red,
+                captain,
+                vice_captain,
             ])
             if not has_match_data:
                 continue
 
-            appearance_rows.append((match_id, pid, starter, minutes, goals, assists, yellow, red))
+            appearance_rows.append((match_id, pid, starter, minutes, goals, assists, yellow, red, captain, vice_captain))
+
+        captains = [row[1] for row in appearance_rows if row[8]]
+        vice_captains = [row[1] for row in appearance_rows if row[9]]
+        if len(captains) > 1:
+            flash("Puoi selezionare un solo capitano C.")
+            return redirect(url_for("coach_formation", match_id=match_id))
+        if len(vice_captains) > 1:
+            flash("Puoi selezionare un solo vice capitano VC.")
+            return redirect(url_for("coach_formation", match_id=match_id))
+        if captains and vice_captains and captains[0] == vice_captains[0]:
+            flash("Capitano C e vice VC devono essere due giocatori diversi.")
+            return redirect(url_for("coach_formation", match_id=match_id))
 
         db_transaction(
             statements=[
@@ -1559,8 +1587,8 @@ def coach_formation():
                 ("DELETE FROM appearances WHERE match_id=?", (match_id,)),
             ],
             batches=[("""
-                INSERT INTO appearances (match_id,player_id,starter,minutes,goals,assists,yellow_cards,red_cards)
-                VALUES (?,?,?,?,?,?,?,?)
+                INSERT INTO appearances (match_id,player_id,starter,minutes,goals,assists,yellow_cards,red_cards,captain,vice_captain)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
             """, appearance_rows)],
         )
         flash("Formazione salvata.")
@@ -1578,7 +1606,7 @@ def coach_formation():
         ex = existing.get(p["id"])
         player_rows += f"""
         <div class="player-row"><div class="player-title">{player_name(p)}</div><div class="small">{p['role'] or '-'}</div>
-        <div class="checks"><label><input type="checkbox" name="play_{p['id']}" {'checked' if ex else ''}> Convocato</label><label><input type="checkbox" name="starter_{p['id']}" {'checked' if ex and ex['starter'] else ''}> Titolare</label></div>
+        <div class="checks"><label><input type="checkbox" name="play_{p['id']}" {'checked' if ex else ''}> Convocato</label><label><input type="checkbox" name="starter_{p['id']}" {'checked' if ex and ex['starter'] else ''}> Titolare</label><label><input type="checkbox" name="sub_{p['id']}" {'checked' if ex and not ex['starter'] else ''}> Subentrato</label><label><input type="checkbox" name="captain_{p['id']}" {'checked' if ex and ex.get('captain') else ''}> C</label><label><input type="checkbox" name="vice_captain_{p['id']}" {'checked' if ex and ex.get('vice_captain') else ''}> VC</label></div>
         <div class="inline"><div><label>Minuti</label><input type="number" min="0" max="130" name="minutes_{p['id']}" value="{ex['minutes'] if ex else 0}"></div><div><label>Gol</label><input type="number" min="0" name="goals_{p['id']}" value="{ex['goals'] if ex else 0}"></div></div>
         <div class="inline"><div><label>Assist</label><input type="number" min="0" name="assists_{p['id']}" value="{ex['assists'] if ex else 0}"></div><div><label>Cartellini</label><div class="checks"><label><input type="checkbox" name="yellow_{p['id']}" {'checked' if ex and ex['yellow_cards'] else ''}> Amm.</label><label><input type="checkbox" name="red_{p['id']}" {'checked' if ex and ex['red_cards'] else ''}> Esp.</label></div></div></div></div>
         """
@@ -1609,6 +1637,18 @@ def coach_training():
             except ValueError:
                 status_int = 0
             attendance_rows.append((session_id, pid, status_int))
+
+        captains = [row[1] for row in appearance_rows if row[8]]
+        vice_captains = [row[1] for row in appearance_rows if row[9]]
+        if len(captains) > 1:
+            flash("Puoi selezionare un solo capitano C.")
+            return redirect(url_for("coach_formation", match_id=match_id))
+        if len(vice_captains) > 1:
+            flash("Puoi selezionare un solo vice capitano VC.")
+            return redirect(url_for("coach_formation", match_id=match_id))
+        if captains and vice_captains and captains[0] == vice_captains[0]:
+            flash("Capitano C e vice VC devono essere due giocatori diversi.")
+            return redirect(url_for("coach_formation", match_id=match_id))
 
         db_transaction(
             statements=[("DELETE FROM training_attendance WHERE session_id=?", (session_id,))],

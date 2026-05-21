@@ -403,42 +403,88 @@ def get_best_player_last_month():
 
 
 def _render_week_card(p):
-    """Figurina nera con fulmini oro — Man of the Match."""
-    full_name = f"{p['last_name']} {p['first_name']}".strip()
-    photo_html = (
-        f"<img class='card-photo-award' src='data:{p['photo_mime']};base64,{p['photo_data']}' alt='Foto'>"
-        if p["photo_data"] else "<div class='card-placeholder-award'>👤</div>"
-    )
+    """Figurina FUT — MOTM: nera + oro."""
+    last  = (p.get('last_name')  or '').upper()
+    first = (p.get('first_name') or '').upper()
+    role  = p.get('role') or ''
+    # Doppio ruolo: "CDC/ATT" → mostra entrambi
+    role_display = " · ".join(r.strip() for r in role.split("/") if r.strip()) or "—"
+
+    if p.get("photo_data"):
+        photo_html = f"<img class='card-photo-award' src='data:{p['photo_mime']};base64,{p['photo_data']}' alt=''>"
+    else:
+        photo_html = "<div class='card-placeholder-award'>👤</div>"
+
+    match_info = f"{ui_date(p['match_date'])} · {p['opponent']}"
+    score = p['media_voto']
+    # Stelle: 1 per ogni punto sopra il 5, max 5
+    try:
+        stars = min(5, max(1, round((float(score) - 4) / 1.2)))
+    except Exception:
+        stars = 3
+    stars_html = "★" * stars + "☆" * (5 - stars)
+
     return f"""
     <div class="award-card-week">
-        <span class="lightning left">⚡</span>
-        <span class="lightning right">⚡</span>
-        <div><span class="award-badge">⭐ Man of the Match</span></div>
-        {photo_html}
-        <div class="award-name">{full_name}</div>
-        <div class="award-role">{p['role'] or '-'}</div>
-        <div class="award-score">{p['media_voto']}</div>
-        <div class="award-label">Media voto partita</div>
-        <div class="award-meta">{ui_date(p['match_date'])} · {p['opponent']}</div>
+      <div class="fut-header">
+        <div class="fut-type">⚡ Man of the Match</div>
+        <div class="fut-badge">⭐ MOTM · Partita</div>
+      </div>
+      <span class="lightning left">⚡</span>
+      <span class="lightning right">⚡</span>
+      <div class="fut-body">
+        <div class="fut-photo-wrap">
+          <div class="fut-photo-ring">{photo_html}</div>
+        </div>
+        <div class="fut-stars">{stars_html}</div>
+        <div class="award-score">{score}</div>
+        <div class="fut-score-label">Media voto</div>
+        <div class="fut-divider"></div>
+        <div class="award-name">{last} {first}</div>
+        <div class="fut-role-pill">{role_display}</div>
+        <div class="award-meta">{match_info}</div>
+      </div>
     </div>
     """
 
 
 def _render_month_card(p):
-    """Figurina rossa e blu — Giocatore del Mese."""
-    full_name = f"{p['last_name']} {p['first_name']}".strip()
-    photo_html = (
-        f"<img class='card-photo-award' src='data:{p['photo_mime']};base64,{p['photo_data']}' alt='Foto'>"
-        if p["photo_data"] else "<div class='card-placeholder-award'>👤</div>"
-    )
+    """Figurina FUT — MOTW: rossa + blu."""
+    last  = (p.get('last_name')  or '').upper()
+    first = (p.get('first_name') or '').upper()
+    role  = p.get('role') or ''
+    role_display = " · ".join(r.strip() for r in role.split("/") if r.strip()) or "—"
+
+    if p.get("photo_data"):
+        photo_html = f"<img class='card-photo-award' src='data:{p['photo_mime']};base64,{p['photo_data']}' alt=''>"
+    else:
+        photo_html = "<div class='card-placeholder-award'>👤</div>"
+
+    month_label = p.get("month_label", "")
+    score = p['media_voto']
+    try:
+        stars = min(5, max(1, round((float(score) - 4) / 1.2)))
+    except Exception:
+        stars = 3
+    stars_html = "★" * stars + "☆" * (5 - stars)
+
     return f"""
     <div class="award-card-month">
-        <div><span class="award-badge-month">🏆 Giocatore del Mese</span></div>
-        {photo_html}
-        <div class="award-name">{full_name}</div>
-        <div class="award-role">{p['role'] or '-'}</div>
-        <div class="award-score">{p['media_voto']}</div>
-        <div class="award-label">Media voto · {p.get('month_label','')}</div>
+      <div class="fut-header">
+        <div class="fut-type">🏆 Giocatore del Mese</div>
+        <div class="fut-badge">🥇 POTM · {month_label}</div>
+      </div>
+      <div class="fut-body">
+        <div class="fut-photo-wrap">
+          <div class="fut-photo-ring">{photo_html}</div>
+        </div>
+        <div class="fut-stars">{stars_html}</div>
+        <div class="award-score">{score}</div>
+        <div class="fut-score-label">Media voto</div>
+        <div class="fut-divider"></div>
+        <div class="award-name">{last} {first}</div>
+        <div class="fut-role-pill">{role_display}</div>
+      </div>
     </div>
     """
 
@@ -703,85 +749,236 @@ button:active,.btn:active{transform:translateY(0)}
   transform:translateY(-1px);
 }
 
-/* ══════════ FIGURINA DELLA SETTIMANA ══════════ */
+
+/* ══════════════════════════════════════════════
+   FIGURINA SETTIMANA — FUT Style: NERA + ORO
+══════════════════════════════════════════════ */
 .award-card-week{
-  background:linear-gradient(160deg,#050e06 0%,#0a1a0b 40%,#071008 100%);
-  border:2px solid var(--gold);border-radius:22px;padding:24px 18px 20px;
+  background:linear-gradient(175deg,#0b0b0b 0%,#1a1400 35%,#0d0d0d 65%,#110e00 100%);
+  border:2px solid #8a6a00;
+  border-radius:18px;
+  padding:0;
   margin-bottom:14px;
-  box-shadow:0 0 40px rgba(201,168,76,.3),0 10px 40px rgba(0,0,0,.7);
+  box-shadow:
+    0 0 0 1px #2a2000,
+    0 0 30px rgba(212,168,0,.25),
+    0 16px 40px rgba(0,0,0,.85);
   position:relative;overflow:hidden;text-align:center;
+  max-width:320px;margin-left:auto;margin-right:auto;
 }
+/* Cornice FUT: doppio bordo oro */
 .award-card-week::before{
-  content:'';position:absolute;inset:0;
-  background:radial-gradient(ellipse at 50% 0%,rgba(201,168,76,.12) 0%,transparent 70%);
-  pointer-events:none;
+  content:'';position:absolute;inset:3px;
+  border:1px solid rgba(212,168,0,.25);
+  border-radius:15px;pointer-events:none;z-index:1;
 }
-.award-card-week .lightning{position:absolute;top:12px;font-size:24px;opacity:.95;filter:drop-shadow(0 0 8px #f5c518);}
-.award-card-week .lightning.left{left:14px;transform:rotate(-15deg)}
-.award-card-week .lightning.right{right:14px;transform:rotate(15deg)}
-.award-card-week .award-badge{
-  display:inline-block;
-  background:linear-gradient(135deg,var(--gold-dark),var(--gold-light),var(--gold-dark));
-  color:#050e06;font-weight:900;font-size:11px;padding:4px 14px;border-radius:20px;
-  letter-spacing:.8px;text-transform:uppercase;margin-bottom:14px;
+/* Bagliore dorato in cima */
+.award-card-week::after{
+  content:'';position:absolute;
+  top:-40px;left:50%;transform:translateX(-50%);
+  width:180px;height:180px;
+  background:radial-gradient(circle,rgba(212,168,0,.18) 0%,transparent 70%);
+  pointer-events:none;z-index:0;
+}
+.award-card-week .fut-header{
+  background:linear-gradient(180deg,#1a1400 0%,#0f0f0f 100%);
+  padding:14px 18px 10px;
+  position:relative;z-index:2;
+  border-bottom:1px solid rgba(212,168,0,.2);
+}
+.award-card-week .fut-type{
+  font-size:9px;font-weight:900;letter-spacing:2.5px;text-transform:uppercase;
+  color:#8a6a00;margin-bottom:4px;
+}
+.award-card-week .fut-badge{
+  display:inline-flex;align-items:center;gap:6px;
+  background:linear-gradient(135deg,#8a6a00,#d4a800,#f0c820,#d4a800,#8a6a00);
+  color:#0b0b0b;font-weight:900;font-size:12px;
+  padding:5px 16px;border-radius:30px;letter-spacing:.6px;
+  box-shadow:0 2px 12px rgba(212,168,0,.4);
+}
+.award-card-week .fut-body{
+  padding:20px 18px 16px;position:relative;z-index:2;
+}
+.award-card-week .lightning{
+  position:absolute;top:50px;font-size:20px;opacity:.6;
+  filter:drop-shadow(0 0 6px #d4a800);z-index:3;
+}
+.award-card-week .lightning.left{left:10px;transform:rotate(-20deg)}
+.award-card-week .lightning.right{right:10px;transform:rotate(20deg)}
+/* Foto con cornice esagonale via clip-path */
+.award-card-week .fut-photo-wrap{
+  position:relative;display:inline-block;margin-bottom:12px;
+}
+.award-card-week .fut-photo-ring{
+  width:124px;height:124px;border-radius:50%;
+  background:linear-gradient(135deg,#8a6a00,#f0c820,#8a6a00);
+  padding:3px;display:inline-block;
+  box-shadow:0 0 20px rgba(212,168,0,.5);
 }
 .award-card-week .card-photo-award{
-  width:140px;height:140px;object-fit:cover;border-radius:50%;
-  border:4px solid var(--gold);box-shadow:0 0 28px rgba(201,168,76,.6);background:#0a1a0b;
+  width:118px;height:118px;object-fit:cover;border-radius:50%;
+  display:block;background:#1a1400;
 }
 .award-card-week .card-placeholder-award{
-  width:140px;height:140px;border-radius:50%;display:flex;align-items:center;
-  justify-content:center;margin:0 auto;background:#0a1a0b;font-size:58px;
-  border:4px solid var(--gold);box-shadow:0 0 28px rgba(201,168,76,.4);
+  width:118px;height:118px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  font-size:52px;background:#1a1400;
 }
-.award-card-week .award-name{font-size:23px;font-weight:900;color:var(--gold-light);margin-top:14px;text-shadow:0 0 14px rgba(240,192,64,.5);}
-.award-card-week .award-role{color:var(--gold);font-weight:700;font-size:13px;margin-top:4px;}
-.award-card-week .award-score{font-size:42px;font-weight:900;color:var(--gold-light);text-shadow:0 0 20px rgba(240,192,64,.7);margin:12px 0 4px;}
-.award-card-week .award-label{font-size:11px;font-weight:800;color:var(--gold-dark);letter-spacing:.7px;text-transform:uppercase;}
-.award-card-week .award-meta{font-size:12px;color:#5a7a5e;margin-top:8px;}
+/* Stelle rating */
+.award-card-week .fut-stars{
+  color:#d4a800;font-size:13px;letter-spacing:2px;margin-bottom:6px;
+}
+.award-card-week .award-score{
+  font-size:52px;font-weight:900;line-height:1;
+  color:#f0c820;
+  text-shadow:0 0 20px rgba(240,192,32,.6),0 2px 0 rgba(0,0,0,.8);
+  letter-spacing:-1px;
+}
+.award-card-week .fut-score-label{
+  font-size:10px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;
+  color:#8a6a00;margin-top:4px;
+}
+/* Divider oro */
+.award-card-week .fut-divider{
+  height:1px;background:linear-gradient(90deg,transparent,#8a6a00,#d4a800,#8a6a00,transparent);
+  margin:12px 0;
+}
+.award-card-week .award-name{
+  font-size:18px;font-weight:900;color:#f0c820;
+  text-transform:uppercase;letter-spacing:1.5px;
+  text-shadow:0 0 10px rgba(240,192,32,.3);
+}
+.award-card-week .fut-role-pill{
+  display:inline-block;margin-top:6px;
+  background:linear-gradient(135deg,#8a6a00,#d4a800);
+  color:#0b0b0b;font-weight:900;font-size:11px;
+  padding:3px 12px;border-radius:20px;letter-spacing:.8px;text-transform:uppercase;
+}
+.award-card-week .award-meta{
+  font-size:11px;color:#5a5030;margin-top:8px;letter-spacing:.3px;
+}
+/* Mini stats FUT */
+.award-card-week .fut-stats{
+  display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:10px;
+}
+.award-card-week .fut-stat{
+  background:rgba(212,168,0,.06);border:1px solid rgba(212,168,0,.12);
+  border-radius:8px;padding:6px 4px;
+}
+.award-card-week .fut-stat-val{font-size:15px;font-weight:900;color:#d4a800;}
+.award-card-week .fut-stat-lbl{font-size:9px;font-weight:800;color:#5a5030;text-transform:uppercase;letter-spacing:.5px;}
 
-/* ══════════ FIGURINA DEL MESE ══════════ */
+/* ══════════════════════════════════════════════
+   FIGURINA MESE — FUT Style: ROSSO + BLU
+══════════════════════════════════════════════ */
 .award-card-month{
-  background:linear-gradient(160deg,#050e06 0%,#0d1a08 50%,#050e06 100%);
-  border:2px solid var(--gold-dark);border-radius:22px;padding:24px 18px 20px;
+  background:linear-gradient(175deg,#0d0008 0%,#1a0016 35%,#00061a 65%,#0a0014 100%);
+  border:2px solid #6a1a6a;
+  border-radius:18px;
+  padding:0;
   margin-bottom:14px;
-  box-shadow:0 0 40px rgba(26,122,46,.25),0 0 40px rgba(201,168,76,.15),0 10px 40px rgba(0,0,0,.7);
+  box-shadow:
+    0 0 0 1px #1a0030,
+    0 0 30px rgba(180,0,80,.2),
+    0 0 30px rgba(0,60,200,.15),
+    0 16px 40px rgba(0,0,0,.85);
   position:relative;overflow:hidden;text-align:center;
+  max-width:320px;margin-left:auto;margin-right:auto;
 }
 .award-card-month::before{
-  content:'';position:absolute;inset:0;
-  background:radial-gradient(ellipse at 50% 0%,rgba(26,122,46,.15) 0%,transparent 70%);
-  pointer-events:none;
+  content:'';position:absolute;inset:3px;
+  border:1px solid rgba(200,50,200,.15);
+  border-radius:15px;pointer-events:none;z-index:1;
 }
-.award-card-month .award-badge-month{
-  display:inline-block;
-  background:linear-gradient(135deg,var(--green-accent),var(--gold-dark),var(--green-accent));
-  color:#fff;font-weight:900;font-size:11px;padding:4px 14px;border-radius:20px;
-  letter-spacing:.8px;text-transform:uppercase;margin-bottom:14px;
+.award-card-month::after{
+  content:'';position:absolute;
+  top:-40px;left:50%;transform:translateX(-50%);
+  width:200px;height:200px;
+  background:radial-gradient(circle,rgba(180,0,100,.15) 0%,rgba(0,50,180,.1) 50%,transparent 70%);
+  pointer-events:none;z-index:0;
+}
+.award-card-month .fut-header{
+  background:linear-gradient(180deg,#1a0016 0%,#0a000f 100%);
+  padding:14px 18px 10px;
+  position:relative;z-index:2;
+  border-bottom:1px solid rgba(180,0,100,.2);
+}
+.award-card-month .fut-type{
+  font-size:9px;font-weight:900;letter-spacing:2.5px;text-transform:uppercase;
+  color:#8a2080;margin-bottom:4px;
+}
+.award-card-month .fut-badge{
+  display:inline-flex;align-items:center;gap:6px;
+  background:linear-gradient(135deg,#8b0030,#cc0050,#ff2060,#1a50cc,#0030aa);
+  color:#fff;font-weight:900;font-size:12px;
+  padding:5px 16px;border-radius:30px;letter-spacing:.6px;
+  box-shadow:0 2px 12px rgba(180,0,80,.4);
+}
+.award-card-month .fut-body{
+  padding:20px 18px 16px;position:relative;z-index:2;
+}
+.award-card-month .fut-photo-ring{
+  width:124px;height:124px;border-radius:50%;
+  background:linear-gradient(135deg,#8b0030,#cc0050,#1a50cc,#0030aa);
+  padding:3px;display:inline-block;
+  box-shadow:0 0 20px rgba(180,0,80,.4),0 0 20px rgba(0,50,180,.3);
 }
 .award-card-month .card-photo-award{
-  width:140px;height:140px;object-fit:cover;border-radius:50%;
-  border:4px solid var(--green-bright);
-  box-shadow:0 0 28px rgba(34,197,94,.4),0 0 28px rgba(201,168,76,.2);background:#0d1a08;
+  width:118px;height:118px;object-fit:cover;border-radius:50%;
+  display:block;background:#1a0016;
 }
 .award-card-month .card-placeholder-award{
-  width:140px;height:140px;border-radius:50%;display:flex;align-items:center;
-  justify-content:center;margin:0 auto;background:#0d1a08;font-size:58px;
-  border:4px solid var(--green-bright);box-shadow:0 0 28px rgba(34,197,94,.3);
+  width:118px;height:118px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  font-size:52px;background:#1a0016;
+}
+.award-card-month .fut-stars{
+  font-size:13px;letter-spacing:2px;margin-bottom:6px;
+  background:linear-gradient(90deg,#ff2060,#6060ff);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
+}
+.award-card-month .award-score{
+  font-size:52px;font-weight:900;line-height:1;letter-spacing:-1px;
+  background:linear-gradient(135deg,#ff4080,#6080ff);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
+  filter:drop-shadow(0 0 10px rgba(180,0,80,.4));
+}
+.award-card-month .fut-score-label{
+  font-size:10px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;
+  color:#6a1a6a;margin-top:4px;
+}
+.award-card-month .fut-divider{
+  height:1px;background:linear-gradient(90deg,transparent,#8b0030,#cc0050,#1a50cc,transparent);
+  margin:12px 0;
 }
 .award-card-month .award-name{
-  font-size:23px;font-weight:900;margin-top:14px;
-  background:linear-gradient(135deg,var(--gold-light),var(--green-bright));
+  font-size:18px;font-weight:900;text-transform:uppercase;letter-spacing:1.5px;
+  background:linear-gradient(135deg,#ff6090,#8090ff);
   -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
 }
-.award-card-month .award-role{color:var(--green-bright);font-weight:700;font-size:13px;margin-top:4px;}
-.award-card-month .award-score{
-  font-size:42px;font-weight:900;margin:12px 0 4px;
-  background:linear-gradient(135deg,var(--gold-light),var(--green-bright));
+.award-card-month .fut-role-pill{
+  display:inline-block;margin-top:6px;
+  background:linear-gradient(135deg,#8b0030,#1a50cc);
+  color:#fff;font-weight:900;font-size:11px;
+  padding:3px 12px;border-radius:20px;letter-spacing:.8px;text-transform:uppercase;
+}
+.award-card-month .award-meta{
+  font-size:11px;color:#4a1a4a;margin-top:8px;letter-spacing:.3px;
+}
+.award-card-month .fut-stats{
+  display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:10px;
+}
+.award-card-month .fut-stat{
+  background:rgba(180,0,80,.06);border:1px solid rgba(180,0,80,.12);
+  border-radius:8px;padding:6px 4px;
+}
+.award-card-month .fut-stat-val{
+  font-size:15px;font-weight:900;
+  background:linear-gradient(135deg,#ff4080,#6080ff);
   -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
 }
-.award-card-month .award-label{font-size:11px;font-weight:800;color:var(--green-bright);letter-spacing:.7px;text-transform:uppercase;}
-.award-card-month .award-meta{font-size:12px;color:#5a7a5e;margin-top:8px;}
+.award-card-month .fut-stat-lbl{font-size:9px;font-weight:800;color:#4a1a4a;text-transform:uppercase;letter-spacing:.5px;}
 </style>
 """
 
@@ -1019,6 +1216,9 @@ def player_card():
 
     p = rows[0]
     full_name = f"{p['last_name']} {p['first_name']}".strip()
+    # Doppio ruolo: "CDC/ATT" → due pill separate
+    roles = [r.strip() for r in (p['role'] or '').split('/') if r.strip()]
+    roles_html = "".join(f"<span class='card-role'>{r}</span>" for r in roles) if roles else "<span class='card-role'>—</span>"
 
     if p["photo_data"]:
         photo_html = f"<img class='card-photo' src='data:{p['photo_mime']};base64,{p['photo_data']}' alt='Foto giocatore'>"
@@ -1029,7 +1229,7 @@ def player_card():
     <div class="card card-preview">
         {photo_html}
         <div class="card-name">{full_name}</div>
-        <div class="card-role">{p['role'] or '-'}</div>
+        <div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap;margin-top:6px">{roles_html}</div>
 
         <div class="stats-grid">
             <div class="stat-box">
@@ -1257,24 +1457,53 @@ def player_votes_redirect():
 def player_votes(match_id):
     voter_id = session["player_id"]
 
-    match_rows = db_query("""
-        SELECT id, match_date, opponent, competition, home_away, COALESCE(result, '') AS result
-        FROM matches
-        WHERE id=?
-    """, (match_id,), fetch=True)
+    # Tutto in una CTE: partita + controllo voto già inserito + lista giocatori votabili
+    ctx = db_query("""
+        WITH match_data AS (
+            SELECT id, match_date, opponent, competition, home_away,
+                   COALESCE(result, '') AS result
+            FROM matches WHERE id=?
+        ),
+        voted_check AS (
+            SELECT COUNT(*) AS total
+            FROM player_votes
+            WHERE match_id=? AND voter_player_id=?
+        ),
+        votable AS (
+            SELECT p.id, p.first_name, p.last_name, p.role,
+                   COALESCE(a.minutes,0) AS minutes, 1 AS votable
+            FROM appearances a
+            JOIN players p ON p.id=a.player_id
+            WHERE a.match_id=? AND COALESCE(a.minutes,0) > 10
+            ORDER BY p.last_name, p.first_name
+        ),
+        fallback AS (
+            SELECT p.id, p.first_name, p.last_name, p.role,
+                   COALESCE(a.minutes,0) AS minutes,
+                   CASE WHEN COALESCE(a.minutes,0) > 10 THEN 1 ELSE 0 END AS votable
+            FROM appearances a
+            JOIN players p ON p.id=a.player_id
+            WHERE a.match_id=?
+            ORDER BY COALESCE(a.starter,0) DESC, p.last_name, p.first_name
+        )
+        SELECT
+            (SELECT id          FROM match_data) AS match_id,
+            (SELECT match_date  FROM match_data) AS match_date,
+            (SELECT opponent    FROM match_data) AS opponent,
+            (SELECT competition FROM match_data) AS competition,
+            (SELECT home_away   FROM match_data) AS home_away,
+            (SELECT result      FROM match_data) AS result,
+            (SELECT total       FROM voted_check) AS already_voted,
+            (SELECT COUNT(*)    FROM votable) AS votable_count
+    """, (match_id, match_id, voter_id, match_id, match_id), fetch=True)
 
-    if not match_rows:
+    if not ctx or ctx[0]["match_id"] is None:
         flash("Partita non trovata.")
         return redirect(url_for("player_matches"))
 
-    match = match_rows[0]
-
-    already_voted_row = db_query("""
-        SELECT COUNT(*) AS total
-        FROM player_votes
-        WHERE match_id=? AND voter_player_id=?
-    """, (match_id, voter_id), fetch=True)[0]
-    already_voted = already_voted_row["total"]
+    c = ctx[0]
+    match = {k: c[k] for k in ("match_id","match_date","opponent","competition","home_away","result")}
+    already_voted = c["already_voted"]
 
     if already_voted:
         content = f"""
@@ -1288,39 +1517,26 @@ def player_votes(match_id):
         """
         return page("Voti già inseriti", f"Ciao {session.get('player_name')}", content)
 
-    # Prima mostra i giocatori votabili secondo la regola dei >10 minuti.
-    # Fallback importante: se la distinta è stata salvata ma i minuti non sono ancora
-    # valorizzati correttamente, mostriamo comunque la distinta invece di una pagina vuota.
-    rows = db_query("""
-        SELECT
-            p.id,
-            p.first_name,
-            p.last_name,
-            p.role,
-            COALESCE(a.minutes, 0) AS minutes,
-            1 AS votable
-        FROM appearances a
-        JOIN players p ON p.id=a.player_id
-        WHERE a.match_id=?
-          AND COALESCE(a.minutes, 0) > 10
-        ORDER BY p.last_name, p.first_name
-    """, (match_id,), fetch=True)
-
-    showing_full_lineup_fallback = False
-
-    if not rows:
+    # Singola query: prima tenta >10 min, se vuoto prende tutta la distinta
+    if c["votable_count"] > 0:
         rows = db_query("""
-            SELECT
-                p.id,
-                p.first_name,
-                p.last_name,
-                p.role,
-                COALESCE(a.minutes, 0) AS minutes,
-                CASE WHEN COALESCE(a.minutes, 0) > 10 THEN 1 ELSE 0 END AS votable
+            SELECT p.id, p.first_name, p.last_name, p.role,
+                   COALESCE(a.minutes,0) AS minutes, 1 AS votable
+            FROM appearances a
+            JOIN players p ON p.id=a.player_id
+            WHERE a.match_id=? AND COALESCE(a.minutes,0) > 10
+            ORDER BY p.last_name, p.first_name
+        """, (match_id,), fetch=True)
+        showing_full_lineup_fallback = False
+    else:
+        rows = db_query("""
+            SELECT p.id, p.first_name, p.last_name, p.role,
+                   COALESCE(a.minutes,0) AS minutes,
+                   CASE WHEN COALESCE(a.minutes,0) > 10 THEN 1 ELSE 0 END AS votable
             FROM appearances a
             JOIN players p ON p.id=a.player_id
             WHERE a.match_id=?
-            ORDER BY COALESCE(a.starter, 0) DESC, p.last_name, p.first_name
+            ORDER BY COALESCE(a.starter,0) DESC, p.last_name, p.first_name
         """, (match_id,), fetch=True)
         showing_full_lineup_fallback = bool(rows)
 
@@ -1722,16 +1938,24 @@ def coach_formation():
     existing = {}
     selected_result = ""
     if selected_match_id:
-        selected = db_query("SELECT result FROM matches WHERE id=?", (selected_match_id,), fetch=True)
-        selected_result = selected[0]["result"] if selected else ""
-        rows = db_query("SELECT * FROM appearances WHERE match_id=?", (selected_match_id,), fetch=True)
-        existing = {r["player_id"]: r for r in rows}
+        rows = db_query("""
+            SELECT m.result,
+                   a.player_id, a.starter, a.subentrato, a.minutes,
+                   a.goals, a.assists, a.yellow_cards, a.red_cards,
+                   a.captain, a.vice_captain
+            FROM matches m
+            LEFT JOIN appearances a ON a.match_id = m.id
+            WHERE m.id=?
+        """, (selected_match_id,), fetch=True)
+        if rows:
+            selected_result = rows[0]["result"] or ""
+            existing = {r["player_id"]: r for r in rows if r["player_id"] is not None}
     match_options = "".join(f"<option value='{m['id']}' {'selected' if str(m['id']) == str(selected_match_id) else ''}>#{m['id']} · {ui_date(m['match_date'])} vs {m['opponent']}</option>" for m in matches)
     player_rows = ""
     for p in players:
         ex = existing.get(p["id"])
         player_rows += f"""
-        <div class="player-row"><div class="player-title">{player_name(p)}</div><div class="small">{p['role'] or '-'}</div>
+        <div class="player-row"><div class="player-title">{player_name(p)}</div><div class="small">{' / '.join(r.strip() for r in (p['role'] or '').split('/') if r.strip()) or '-'}</div>
         <div class="checks"><label><input type="checkbox" name="play_{p['id']}" data-player="{p['id']}" data-role="play" {'checked' if ex else ''}> Convocato</label><label><input class="exclusive-presence" type="checkbox" name="starter_{p['id']}" data-player="{p['id']}" data-role="starter" {'checked' if ex and ex['starter'] else ''}> Titolare</label><label><input class="exclusive-presence" type="checkbox" name="sub_{p['id']}" data-player="{p['id']}" data-role="sub" {'checked' if ex and int(ex.get('subentrato') or 0) else ''}> Subentrato</label><label><input type="checkbox" name="captain_{p['id']}" {'checked' if ex and ex.get('captain') else ''}> C</label><label><input type="checkbox" name="vice_captain_{p['id']}" {'checked' if ex and ex.get('vice_captain') else ''}> VC</label></div>
         <div class="inline"><div><label>Minuti</label><input type="number" min="0" max="130" name="minutes_{p['id']}" value="{ex['minutes'] if ex else 0}"></div><div><label>Gol</label><input type="number" min="0" name="goals_{p['id']}" value="{ex['goals'] if ex else 0}"></div></div>
         <div class="inline"><div><label>Assist</label><input type="number" min="0" name="assists_{p['id']}" value="{ex['assists'] if ex else 0}"></div><div><label>Cartellini</label><div class="checks"><label><input type="checkbox" name="yellow_{p['id']}" {'checked' if ex and ex['yellow_cards'] else ''}> Amm.</label><label><input type="checkbox" name="red_{p['id']}" {'checked' if ex and ex['red_cards'] else ''}> Esp.</label></div></div></div></div>
@@ -1793,7 +2017,7 @@ def coach_training():
     for p in players:
         status = existing.get(p["id"], 0)
         player_rows += f"""
-        <div class="player-row"><div class="player-title">{player_name(p)}</div><div class="small">{p['role'] or '-'}</div>
+        <div class="player-row"><div class="player-title">{player_name(p)}</div><div class="small">{' / '.join(r.strip() for r in (p['role'] or '').split('/') if r.strip()) or '-'}</div>
         <div class="checks"><label><input type="radio" name="status_{p['id']}" value="1" {'checked' if status == 1 else ''}> Presente</label><label><input type="radio" name="status_{p['id']}" value="2" {'checked' if status == 2 else ''}> Infortunato</label></div>
         <label class="small"><input type="radio" name="status_{p['id']}" value="0" {'checked' if status == 0 else ''}> Assente</label></div>
         """

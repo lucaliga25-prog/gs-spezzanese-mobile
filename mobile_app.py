@@ -717,11 +717,12 @@ def player_home():
 
 def _build_vote_choices():
     choices = []
-    for base in range(4, 11):
-        choices.append((f"{base}-", base - 0.25))
+    for base in range(3, 11):
+        if base > 3:
+            choices.append((f"{base}-", base - 0.25))
         choices.append((str(base), float(base)))
-        choices.append((f"{base}+", base + 0.25))
         if base < 10:
+            choices.append((f"{base}+", base + 0.25))
             choices.append((f"{base}.5", base + 0.5))
     return tuple(choices)
 
@@ -739,7 +740,7 @@ def parse_vote(value):
     except Exception:
         return None
 
-    if rating < 1 or rating > 10.25:
+    if rating < 3 or rating > 10:
         return None
 
     return rating

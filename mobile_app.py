@@ -20,6 +20,52 @@ DB_POOL = SimpleConnectionPool(1, int(os.getenv("DB_POOL_MAX", "16")), dsn=DATAB
 
 COACH_PASSWORD = "spezzanese2627"
 
+# Nomi autorizzati ad accedere anche se non sono presenti nella rosa calciatori.
+# Vengono gestiti come “votanti mister” creando, se manca, un record tecnico
+# nella tabella players con ruolo MISTER, così i vincoli del database sui voti restano validi.
+AUTHORIZED_COACH_PLAYER_ACCESS = {
+    ("stefano", "lanzellotto"),
+    ("luigi", "andreoli"),
+    ("lampos", "lampos"),
+}
+
+
+def _norm_name(value):
+    return " ".join((value or "").strip().lower().split())
+
+
+def is_authorized_coach_name(first_name, last_name):
+    return (_norm_name(first_name), _norm_name(last_name)) in AUTHORIZED_COACH_PLAYER_ACCESS
+
+
+def get_or_create_coach_player(first_name, last_name):
+    rows = db_query("""
+        SELECT id, first_name, last_name
+        FROM players
+        WHERE lower(trim(first_name))=lower(trim(?))
+          AND lower(trim(last_name))=lower(trim(?))
+        ORDER BY id
+        LIMIT 1
+    """, (first_name, last_name), fetch=True)
+
+    if rows:
+        return rows[0]
+
+    db_query("""
+        INSERT INTO players (first_name, last_name, birth_date, role)
+        VALUES (?, ?, '', 'MISTER')
+    """, (first_name.strip().title(), last_name.strip().title()))
+
+    rows = db_query("""
+        SELECT id, first_name, last_name
+        FROM players
+        WHERE lower(trim(first_name))=lower(trim(?))
+          AND lower(trim(last_name))=lower(trim(?))
+        ORDER BY id DESC
+        LIMIT 1
+    """, (first_name, last_name), fetch=True)
+    return rows[0] if rows else None
+
 app = Flask(__name__)
 app.secret_key = "gestionale-gs-spezzanese-mobile-secret"
 
@@ -729,13 +775,23 @@ def home():
                 WHERE lower(trim(first_name))=lower(trim(?)) AND lower(trim(last_name))=lower(trim(?))
                 LIMIT 1
             """, (first_name, last_name), fetch=True)
+            is_coach_player_access = False
+
+            if not player and is_authorized_coach_name(first_name, last_name):
+                coach_player = get_or_create_coach_player(first_name, last_name)
+                if coach_player:
+                    player = [coach_player]
+                    is_coach_player_access = True
+
             if not player:
-                flash("Giocatore non trovato. Controlla nome e cognome.")
+                flash("Nome non autorizzato. Inserisci nome e cognome di un calciatore presente nel database oppure di uno dei mister autorizzati.")
                 return redirect(url_for("home"))
+
             session.clear()
             session["role"] = "player"
             session["player_id"] = player[0]["id"]
             session["player_name"] = f"{player[0]['last_name']} {player[0]['first_name']}"
+            session["is_coach_player_access"] = 1 if is_coach_player_access else 0
             return redirect(url_for("player_home"))
         if mode == "coach":
             if request.form.get("password", "") != COACH_PASSWORD:
@@ -745,10 +801,10 @@ def home():
             session["role"] = "coach"
             return redirect(url_for("coach_panel"))
     content = """
-    <div class="card"><h2>Accesso giocatore</h2><form method="post"><input type="hidden" name="mode" value="player"><label>Nome</label><input name="first_name" required><label>Cognome</label><input name="last_name" required><button>Entra e vota</button></form></div>
+    <div class="card"><h2>Accesso giocatore / mister</h2><form method="post"><input type="hidden" name="mode" value="player"><label>Nome</label><input name="first_name" required><label>Cognome</label><input name="last_name" required><button>Entra e vota</button><div class="small">Accesso consentito ai calciatori presenti nel database e ai mister autorizzati.</div></form></div>
     <div class="card"><h2>Accesso allenatore</h2><form method="post"><input type="hidden" name="mode" value="coach"><label>Password allenatore</label><input name="password" type="password" required><button class="btn-dark">Entra come allenatore</button></form></div>
     """
-    return page("GS Spezzanese Mobile", "Accesso giocatori e allenatore", content)
+    return page("GS Spezzanese Mobile", "Accesso giocatori, mister e allenatore", content)
 
 
 @app.route("/logout")
@@ -817,7 +873,16 @@ def player_home():
         flash("Foto figurina aggiornata correttamente.")
         return redirect(url_for("player_home"))
 
-    content = """
+    coach_access_note = ""
+    if session.get("is_coach_player_access"):
+        coach_access_note = """
+        <div class="card">
+            <h2>Accesso mister</h2>
+            <div class="small">Sei entrato nella zona calciatori come mister autorizzato. Puoi usare la sezione voti come votante mister.</div>
+        </div>
+        """
+
+    content = coach_access_note + """
     <div class="card">
         <h2>Foto figurina</h2>
         <form method="post" enctype="multipart/form-data">

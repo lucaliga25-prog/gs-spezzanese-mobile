@@ -117,6 +117,7 @@ def ensure_db():
                     match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
                     player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
                     starter INTEGER DEFAULT 0,
+                    subentrato INTEGER DEFAULT 0,
                     minutes INTEGER DEFAULT 0,
                     goals INTEGER DEFAULT 0,
                     assists INTEGER DEFAULT 0,
@@ -1371,12 +1372,12 @@ def coach_player_stats():
 
         LEFT JOIN (
             SELECT
-                s.player_in_id AS player_id,
-                COUNT(*) AS subentrato
-            FROM substitutions s
-            JOIN matches m ON m.id=s.match_id
+                a.player_id,
+                SUM(CASE WHEN COALESCE(a.subentrato,0)=1 THEN 1 ELSE 0 END) AS subentrato
+            FROM appearances a
+            JOIN matches m ON m.id=a.match_id
             WHERE m.match_date BETWEEN ? AND ?
-            GROUP BY s.player_in_id
+            GROUP BY a.player_id
         ) si ON si.player_id=p.id
 
         LEFT JOIN (
@@ -1533,6 +1534,11 @@ def coach_formation():
             pid = player["id"]
             starter = 1 if request.form.get(f"starter_{pid}") else 0
             substitute = 1 if request.form.get(f"sub_{pid}") else 0
+
+            # Sicurezza lato server: anche se il browser inviasse entrambe le spunte,
+            # Titolare e Subentrato non possono essere veri insieme.
+            if starter and substitute:
+                substitute = 0
             captain = 1 if request.form.get(f"captain_{pid}") else 0
             vice_captain = 1 if request.form.get(f"vice_captain_{pid}") else 0
 
@@ -1567,10 +1573,10 @@ def coach_formation():
             if not has_match_data:
                 continue
 
-            appearance_rows.append((match_id, pid, starter, minutes, goals, assists, yellow, red, captain, vice_captain))
+            appearance_rows.append((match_id, pid, starter, substitute, minutes, goals, assists, yellow, red, captain, vice_captain))
 
-        captains = [row[1] for row in appearance_rows if row[8]]
-        vice_captains = [row[1] for row in appearance_rows if row[9]]
+        captains = [row[1] for row in appearance_rows if row[9]]
+        vice_captains = [row[1] for row in appearance_rows if row[10]]
         if len(captains) > 1:
             flash("Puoi selezionare un solo capitano C.")
             return redirect(url_for("coach_formation", match_id=match_id))
@@ -1587,8 +1593,8 @@ def coach_formation():
                 ("DELETE FROM appearances WHERE match_id=?", (match_id,)),
             ],
             batches=[("""
-                INSERT INTO appearances (match_id,player_id,starter,minutes,goals,assists,yellow_cards,red_cards,captain,vice_captain)
-                VALUES (?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO appearances (match_id,player_id,starter,subentrato,minutes,goals,assists,yellow_cards,red_cards,captain,vice_captain)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
             """, appearance_rows)],
         )
         flash("Formazione salvata.")
@@ -1606,13 +1612,27 @@ def coach_formation():
         ex = existing.get(p["id"])
         player_rows += f"""
         <div class="player-row"><div class="player-title">{player_name(p)}</div><div class="small">{p['role'] or '-'}</div>
-        <div class="checks"><label><input type="checkbox" name="play_{p['id']}" {'checked' if ex else ''}> Convocato</label><label><input type="checkbox" name="starter_{p['id']}" {'checked' if ex and ex['starter'] else ''}> Titolare</label><label><input type="checkbox" name="sub_{p['id']}" {'checked' if ex and not ex['starter'] else ''}> Subentrato</label><label><input type="checkbox" name="captain_{p['id']}" {'checked' if ex and ex.get('captain') else ''}> C</label><label><input type="checkbox" name="vice_captain_{p['id']}" {'checked' if ex and ex.get('vice_captain') else ''}> VC</label></div>
+        <div class="checks"><label><input type="checkbox" name="play_{p['id']}" data-player="{p['id']}" data-role="play" {'checked' if ex else ''}> Convocato</label><label><input class="exclusive-presence" type="checkbox" name="starter_{p['id']}" data-player="{p['id']}" data-role="starter" {'checked' if ex and ex['starter'] else ''}> Titolare</label><label><input class="exclusive-presence" type="checkbox" name="sub_{p['id']}" data-player="{p['id']}" data-role="sub" {'checked' if ex and ex.get('subentrato') else ''}> Subentrato</label><label><input type="checkbox" name="captain_{p['id']}" {'checked' if ex and ex.get('captain') else ''}> C</label><label><input type="checkbox" name="vice_captain_{p['id']}" {'checked' if ex and ex.get('vice_captain') else ''}> VC</label></div>
         <div class="inline"><div><label>Minuti</label><input type="number" min="0" max="130" name="minutes_{p['id']}" value="{ex['minutes'] if ex else 0}"></div><div><label>Gol</label><input type="number" min="0" name="goals_{p['id']}" value="{ex['goals'] if ex else 0}"></div></div>
         <div class="inline"><div><label>Assist</label><input type="number" min="0" name="assists_{p['id']}" value="{ex['assists'] if ex else 0}"></div><div><label>Cartellini</label><div class="checks"><label><input type="checkbox" name="yellow_{p['id']}" {'checked' if ex and ex['yellow_cards'] else ''}> Amm.</label><label><input type="checkbox" name="red_{p['id']}" {'checked' if ex and ex['red_cards'] else ''}> Esp.</label></div></div></div></div>
         """
     content = f"""
     <div class="card"><h2>Formazione partita</h2><form method="get"><label>Partita</label><select name="match_id" onchange="this.form.submit()">{match_options}</select></form></div>
     <form method="post"><input type="hidden" name="match_id" value="{selected_match_id or ''}"><div class="card"><label>Risultato</label><input name="result" placeholder="es. 2-1" value="{selected_result or ''}"></div><div class="card"><h2>Giocatori</h2>{player_rows or 'Nessun giocatore.'}<button>Salva formazione</button></div></form><a class="btn btn-blue" href="/coach">Indietro</a>
+    <script>
+    document.querySelectorAll('.exclusive-presence').forEach(function(cb) {{
+        cb.addEventListener('change', function() {{
+            if (!this.checked) return;
+            var pid = this.dataset.player;
+            var role = this.dataset.role;
+            var otherRole = role === 'starter' ? 'sub' : 'starter';
+            var other = document.querySelector('input[data-player="' + pid + '"][data-role="' + otherRole + '"]');
+            if (other) other.checked = false;
+            var play = document.querySelector('input[data-player="' + pid + '"][data-role="play"]');
+            if (play) play.checked = true;
+        }});
+    }});
+    </script>
     """
     return page("Formazione", "Gestione formazione e dati partita", content)
 
@@ -1638,8 +1658,8 @@ def coach_training():
                 status_int = 0
             attendance_rows.append((session_id, pid, status_int))
 
-        captains = [row[1] for row in appearance_rows if row[8]]
-        vice_captains = [row[1] for row in appearance_rows if row[9]]
+        captains = [row[1] for row in appearance_rows if row[9]]
+        vice_captains = [row[1] for row in appearance_rows if row[10]]
         if len(captains) > 1:
             flash("Puoi selezionare un solo capitano C.")
             return redirect(url_for("coach_formation", match_id=match_id))

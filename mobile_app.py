@@ -256,6 +256,30 @@ def player_name(row):
     return f"{row['last_name']} {row['first_name']}".strip()
 
 
+def parse_team_goals_from_result(result, home_away):
+    """Restituisce i gol della nostra squadra partendo dal risultato tipo 2-1."""
+    clean = (result or "").replace(" ", "")
+    if not clean:
+        return None, "Inserisci il risultato nel formato 2-1."
+    if "-" not in clean:
+        return None, "Il risultato deve essere nel formato 2-1."
+
+    parts = clean.split("-")
+    if len(parts) != 2:
+        return None, "Il risultato deve essere nel formato 2-1."
+
+    try:
+        left = int(parts[0])
+        right = int(parts[1])
+    except ValueError:
+        return None, "Il risultato deve contenere solo numeri, esempio 2-1."
+
+    if left < 0 or right < 0:
+        return None, "Il risultato non può avere numeri negativi."
+
+    return (left if home_away == "Casa" else right), None
+
+
 def get_players():
     return db_query("""
         SELECT id, first_name, last_name, role
@@ -1618,6 +1642,10 @@ def coach_formation():
             yellow = 1 if request.form.get(f"yellow_{pid}") else 0
             red = 1 if request.form.get(f"red_{pid}") else 0
 
+            if min(minutes, goals, assists) < 0:
+                flash("Minuti, gol e assist non possono essere negativi.")
+                return redirect(url_for("coach_formation", match_id=match_id))
+
             # Prima venivano salvati solo i giocatori con la spunta "Convocato".
             # Da mobile può capitare di compilare minuti/gol/assist/cartellini senza
             # attivare la spunta: in quel caso i dati venivano scartati e non
@@ -1650,6 +1678,26 @@ def coach_formation():
             return redirect(url_for("coach_formation", match_id=match_id))
         if captains and vice_captains and captains[0] == vice_captains[0]:
             flash("Capitano C e vice VC devono essere due giocatori diversi.")
+            return redirect(url_for("coach_formation", match_id=match_id))
+
+        match_rows = db_query("SELECT home_away FROM matches WHERE id=?", (match_id,), fetch=True)
+        home_away = match_rows[0]["home_away"] if match_rows else "Casa"
+        expected_goals, result_error = parse_team_goals_from_result(result, home_away)
+        if result_error:
+            flash(result_error)
+            return redirect(url_for("coach_formation", match_id=match_id))
+
+        total_goals = sum(row[5] for row in appearance_rows)
+        total_assists = sum(row[6] for row in appearance_rows)
+
+        if total_goals != expected_goals:
+            flash(f"La somma dei gol dei giocatori è {total_goals}, ma dal risultato i gol squadra sono {expected_goals}.")
+            return redirect(url_for("coach_formation", match_id=match_id))
+
+        # Gli assist non possono essere più dei gol segnati dalla squadra.
+        # Non richiediamo assist == gol perché alcuni gol possono non avere assist.
+        if total_assists > expected_goals:
+            flash(f"La somma degli assist è {total_assists}, ma i gol squadra sono {expected_goals}. Gli assist non possono essere più dei gol segnati.")
             return redirect(url_for("coach_formation", match_id=match_id))
 
         db_transaction(
@@ -1733,6 +1781,26 @@ def coach_training():
             return redirect(url_for("coach_formation", match_id=match_id))
         if captains and vice_captains and captains[0] == vice_captains[0]:
             flash("Capitano C e vice VC devono essere due giocatori diversi.")
+            return redirect(url_for("coach_formation", match_id=match_id))
+
+        match_rows = db_query("SELECT home_away FROM matches WHERE id=?", (match_id,), fetch=True)
+        home_away = match_rows[0]["home_away"] if match_rows else "Casa"
+        expected_goals, result_error = parse_team_goals_from_result(result, home_away)
+        if result_error:
+            flash(result_error)
+            return redirect(url_for("coach_formation", match_id=match_id))
+
+        total_goals = sum(row[5] for row in appearance_rows)
+        total_assists = sum(row[6] for row in appearance_rows)
+
+        if total_goals != expected_goals:
+            flash(f"La somma dei gol dei giocatori è {total_goals}, ma dal risultato i gol squadra sono {expected_goals}.")
+            return redirect(url_for("coach_formation", match_id=match_id))
+
+        # Gli assist non possono essere più dei gol segnati dalla squadra.
+        # Non richiediamo assist == gol perché alcuni gol possono non avere assist.
+        if total_assists > expected_goals:
+            flash(f"La somma degli assist è {total_assists}, ma i gol squadra sono {expected_goals}. Gli assist non possono essere più dei gol segnati.")
             return redirect(url_for("coach_formation", match_id=match_id))
 
         db_transaction(

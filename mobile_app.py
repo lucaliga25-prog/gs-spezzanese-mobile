@@ -215,6 +215,13 @@ def ensure_db():
 
             cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS photo_data TEXT DEFAULT ''")
             cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS photo_mime TEXT DEFAULT ''")
+            cur.execute("ALTER TABLE appearances ADD COLUMN IF NOT EXISTS starter INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE appearances ADD COLUMN IF NOT EXISTS subentrato INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE appearances ADD COLUMN IF NOT EXISTS minutes INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE appearances ADD COLUMN IF NOT EXISTS goals INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE appearances ADD COLUMN IF NOT EXISTS assists INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE appearances ADD COLUMN IF NOT EXISTS yellow_cards INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE appearances ADD COLUMN IF NOT EXISTS red_cards INTEGER DEFAULT 0")
             cur.execute("ALTER TABLE appearances ADD COLUMN IF NOT EXISTS captain INTEGER DEFAULT 0")
             cur.execute("ALTER TABLE appearances ADD COLUMN IF NOT EXISTS vice_captain INTEGER DEFAULT 0")
             cur.execute("ALTER TABLE player_votes ALTER COLUMN rating TYPE NUMERIC(4,2) USING rating::numeric")
@@ -1725,7 +1732,7 @@ def coach_formation():
         ex = existing.get(p["id"])
         player_rows += f"""
         <div class="player-row"><div class="player-title">{player_name(p)}</div><div class="small">{p['role'] or '-'}</div>
-        <div class="checks"><label><input type="checkbox" name="play_{p['id']}" data-player="{p['id']}" data-role="play" {'checked' if ex else ''}> Convocato</label><label><input class="exclusive-presence" type="checkbox" name="starter_{p['id']}" data-player="{p['id']}" data-role="starter" {'checked' if ex and ex['starter'] else ''}> Titolare</label><label><input class="exclusive-presence" type="checkbox" name="sub_{p['id']}" data-player="{p['id']}" data-role="sub" {'checked' if ex and ex.get('subentrato') else ''}> Subentrato</label><label><input type="checkbox" name="captain_{p['id']}" {'checked' if ex and ex.get('captain') else ''}> C</label><label><input type="checkbox" name="vice_captain_{p['id']}" {'checked' if ex and ex.get('vice_captain') else ''}> VC</label></div>
+        <div class="checks"><label><input type="checkbox" name="play_{p['id']}" data-player="{p['id']}" data-role="play" {'checked' if ex else ''}> Convocato</label><label><input class="exclusive-presence" type="checkbox" name="starter_{p['id']}" data-player="{p['id']}" data-role="starter" {'checked' if ex and ex['starter'] else ''}> Titolare</label><label><input class="exclusive-presence" type="checkbox" name="sub_{p['id']}" data-player="{p['id']}" data-role="sub" {'checked' if ex and int(ex.get('subentrato') or 0) else ''}> Subentrato</label><label><input type="checkbox" name="captain_{p['id']}" {'checked' if ex and ex.get('captain') else ''}> C</label><label><input type="checkbox" name="vice_captain_{p['id']}" {'checked' if ex and ex.get('vice_captain') else ''}> VC</label></div>
         <div class="inline"><div><label>Minuti</label><input type="number" min="0" max="130" name="minutes_{p['id']}" value="{ex['minutes'] if ex else 0}"></div><div><label>Gol</label><input type="number" min="0" name="goals_{p['id']}" value="{ex['goals'] if ex else 0}"></div></div>
         <div class="inline"><div><label>Assist</label><input type="number" min="0" name="assists_{p['id']}" value="{ex['assists'] if ex else 0}"></div><div><label>Cartellini</label><div class="checks"><label><input type="checkbox" name="yellow_{p['id']}" {'checked' if ex and ex['yellow_cards'] else ''}> Amm.</label><label><input type="checkbox" name="red_{p['id']}" {'checked' if ex and ex['red_cards'] else ''}> Esp.</label></div></div></div></div>
         """

@@ -869,6 +869,26 @@ def player_card():
     player_id = session["player_id"]
 
     rows = db_query("""
+        WITH app_stats AS (
+            SELECT
+                a.player_id,
+                COUNT(*) AS presenze,
+                COALESCE(SUM(a.goals), 0) AS gol,
+                COALESCE(SUM(a.assists), 0) AS assist
+            FROM appearances a
+            JOIN matches m ON m.id = a.match_id
+            WHERE a.player_id=?
+            GROUP BY a.player_id
+        ),
+        vote_stats AS (
+            SELECT
+                v.voted_player_id AS player_id,
+                COALESCE(ROUND(AVG(v.rating)::numeric, 2), 0) AS media_voto
+            FROM player_votes v
+            JOIN matches m ON m.id = v.match_id
+            WHERE v.voted_player_id=?
+            GROUP BY v.voted_player_id
+        )
         SELECT
             p.id,
             p.first_name,
@@ -876,16 +896,15 @@ def player_card():
             COALESCE(p.role, '') AS role,
             COALESCE(p.photo_data, '') AS photo_data,
             COALESCE(p.photo_mime, 'image/jpeg') AS photo_mime,
-            COUNT(a.id) AS presenze,
-            COALESCE(SUM(a.goals), 0) AS gol,
-            COALESCE(SUM(a.assists), 0) AS assist,
-            COALESCE(ROUND(AVG(v.rating)::numeric, 2), 0) AS media_voto
+            COALESCE(app.presenze, 0) AS presenze,
+            COALESCE(app.gol, 0) AS gol,
+            COALESCE(app.assist, 0) AS assist,
+            COALESCE(vote.media_voto, 0) AS media_voto
         FROM players p
-        LEFT JOIN appearances a ON a.player_id=p.id
-        LEFT JOIN player_votes v ON v.voted_player_id=p.id
+        LEFT JOIN app_stats app ON app.player_id = p.id
+        LEFT JOIN vote_stats vote ON vote.player_id = p.id
         WHERE p.id=?
-        GROUP BY p.id, p.first_name, p.last_name, p.role, p.photo_data, p.photo_mime
-    """, (player_id,), fetch=True)
+    """, (player_id, player_id, player_id), fetch=True)
 
     if not rows:
         flash("Giocatore non trovato.")
@@ -1162,19 +1181,41 @@ def player_votes(match_id):
         """
         return page("Voti già inseriti", f"Ciao {session.get('player_name')}", content)
 
+    # Prima mostra i giocatori votabili secondo la regola dei >10 minuti.
+    # Fallback importante: se la distinta è stata salvata ma i minuti non sono ancora
+    # valorizzati correttamente, mostriamo comunque la distinta invece di una pagina vuota.
     rows = db_query("""
         SELECT
             p.id,
             p.first_name,
             p.last_name,
             p.role,
-            a.minutes
+            COALESCE(a.minutes, 0) AS minutes,
+            1 AS votable
         FROM appearances a
         JOIN players p ON p.id=a.player_id
         WHERE a.match_id=?
           AND COALESCE(a.minutes, 0) > 10
         ORDER BY p.last_name, p.first_name
     """, (match_id,), fetch=True)
+
+    showing_full_lineup_fallback = False
+
+    if not rows:
+        rows = db_query("""
+            SELECT
+                p.id,
+                p.first_name,
+                p.last_name,
+                p.role,
+                COALESCE(a.minutes, 0) AS minutes,
+                CASE WHEN COALESCE(a.minutes, 0) > 10 THEN 1 ELSE 0 END AS votable
+            FROM appearances a
+            JOIN players p ON p.id=a.player_id
+            WHERE a.match_id=?
+            ORDER BY COALESCE(a.starter, 0) DESC, p.last_name, p.first_name
+        """, (match_id,), fetch=True)
+        showing_full_lineup_fallback = bool(rows)
 
     if request.method == "POST":
         if not rows:
@@ -1229,10 +1270,11 @@ def player_votes(match_id):
                         <div class="player-title">{player_name(row)}</div>
                         <div class="small">{row['role'] or '-'} · {row['minutes']} minuti</div>
                     </div>
-                    <select name="rating_{row['id']}">
+                    <select name="rating_{row['id']}" {'disabled' if int(row.get('votable') or 0) != 1 else ''}>
                         {options}
                     </select>
                 </div>
+                {"<div class='small'>Non votabile: meno di 11 minuti.</div>" if int(row.get('votable') or 0) != 1 else ""}
             </div>
             """
 
@@ -1242,6 +1284,7 @@ def player_votes(match_id):
         <div><b>{ui_date(match['match_date'])}</b> vs {match['opponent']}</div>
         <div class="small">{match['competition']} · {match['home_away']} · Risultato: {match['result'] or '-'}</div>
         <div class="small">Puoi votare solo i giocatori che hanno fatto più di 10 minuti.</div>
+        {"<div class='flash'>La distinta è presente, ma nessun giocatore risulta sopra i 10 minuti: controllo minuti consigliato dal gestionale desktop.</div>" if showing_full_lineup_fallback else ""}
         <div class="small"><b>Attenzione:</b> dopo il salvataggio non potrai più modificare i voti di questa partita.</div>
     </div>
 
@@ -1478,17 +1521,36 @@ def coach_formation():
         appearance_rows = []
         for player in players:
             pid = player["id"]
-            if not request.form.get(f"play_{pid}"):
-                continue
             starter = 1 if request.form.get(f"starter_{pid}") else 0
+
             try:
                 minutes = int(request.form.get(f"minutes_{pid}") or 0)
                 goals = int(request.form.get(f"goals_{pid}") or 0)
                 assists = int(request.form.get(f"assists_{pid}") or 0)
             except ValueError:
-                minutes = goals = assists = 0
+                flash("Controlla minuti, gol e assist: devono essere numeri interi.")
+                return redirect(url_for("coach_formation", match_id=match_id))
+
             yellow = 1 if request.form.get(f"yellow_{pid}") else 0
             red = 1 if request.form.get(f"red_{pid}") else 0
+
+            # Prima venivano salvati solo i giocatori con la spunta "Convocato".
+            # Da mobile può capitare di compilare minuti/gol/assist/cartellini senza
+            # attivare la spunta: in quel caso i dati venivano scartati e non
+            # comparivano nelle statistiche giocatore. Ora il giocatore viene
+            # incluso automaticamente se ha qualsiasi dato partita valorizzato.
+            has_match_data = any([
+                request.form.get(f"play_{pid}"),
+                starter,
+                minutes > 0,
+                goals > 0,
+                assists > 0,
+                yellow,
+                red,
+            ])
+            if not has_match_data:
+                continue
+
             appearance_rows.append((match_id, pid, starter, minutes, goals, assists, yellow, red))
 
         db_transaction(

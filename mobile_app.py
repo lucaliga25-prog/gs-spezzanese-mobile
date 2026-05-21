@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from datetime import date
 from functools import wraps
 
-from flask import Flask, request, redirect, url_for, session, flash, get_flashed_messages, jsonify
+from flask import Flask, request, redirect, url_for, session, flash, get_flashed_messages
 from datetime import timedelta
 
 load_dotenv()
@@ -67,27 +67,6 @@ def get_or_create_coach_player(first_name, last_name):
     return rows[0] if rows else None
 
 app = Flask(__name__)
-@app.route('/manifest.json')
-def manifest():
-    return jsonify({
-        "name": "GS Spezzanese",
-        "short_name": "Spezzanese",
-        "start_url": "/",
-        "scope": "/",
-        "display": "standalone",
-        "orientation": "portrait",
-        "background_color": "#0a1f0e",
-        "theme_color": "#0a1f0e",
-        "description": "Gestionale ufficiale GS Spezzanese",
-        "icons": [
-            {
-                "src": "/static/icon.png",
-                "sizes": "192x192",
-                "type": "image/png",
-                "purpose": "any maskable"
-            }
-        ]
-    })
 app.secret_key = "gestionale-gs-spezzanese-mobile-secret"
 
 
@@ -810,21 +789,7 @@ button:active,.btn:active{transform:translateY(0)}
 def page(title, subtitle, content):
     flashes = "".join(f"<div class='flash'>{m}</div>" for m in get_flashed_messages())
     return f"""
-    <!doctype html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
-
-<link rel="manifest" href="/manifest.json">
-<meta name="theme-color" content="#0a1f0e">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Spezzanese">
-<link rel="apple-touch-icon" href="/static/icon-192.png">
-
-{BASE_STYLE}
-</head>
+    <!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title>{BASE_STYLE}</head>
     <body><div class="header"><h1>{title}</h1><p>{subtitle}</p></div><div class="container">{flashes}{content}<div class="footer-space"></div></div></body></html>
     """
 

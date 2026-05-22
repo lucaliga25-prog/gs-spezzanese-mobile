@@ -1891,8 +1891,36 @@ def coach_formation():
 
             appearance_rows.append((match_id, pid, starter, substitute, minutes, goals, assists, yellow, red, captain, vice_captain))
 
-        captains = [row[1] for row in appearance_rows if row[9]]
+        captains      = [row[1] for row in appearance_rows if row[9]]
         vice_captains = [row[1] for row in appearance_rows if row[10]]
+
+        # ── Vincoli formazione ────────────────────────────────────────────
+        n_convocati  = len(appearance_rows)
+        n_titolari   = sum(1 for row in appearance_rows if row[2] == 1)   # starter
+        n_subentrati = sum(1 for row in appearance_rows if row[3] == 1)   # subentrato
+
+        if n_convocati > 20:
+            flash(f"I convocati sono {n_convocati}: il massimo consentito è 20.")
+            return redirect(url_for("coach_formation", match_id=match_id))
+
+        if n_titolari > 11:
+            flash(f"I titolari sono {n_titolari}: il massimo consentito è 11.")
+            return redirect(url_for("coach_formation", match_id=match_id))
+
+        # Ogni titolare deve avere almeno 1 minuto
+        titolari_senza_minuti = [
+            row for row in appearance_rows if row[2] == 1 and row[4] < 1
+        ]
+        if titolari_senza_minuti:
+            flash(f"{len(titolari_senza_minuti)} titolar{'e' if len(titolari_senza_minuti)==1 else 'i'} "
+                  f"{'ha' if len(titolari_senza_minuti)==1 else 'hanno'} 0 minuti: "
+                  f"ogni titolare deve avere almeno 1 minuto.")
+            return redirect(url_for("coach_formation", match_id=match_id))
+
+        if n_subentrati > 5:
+            flash(f"I subentrati sono {n_subentrati}: il massimo consentito è 5.")
+            return redirect(url_for("coach_formation", match_id=match_id))
+        # ─────────────────────────────────────────────────────────────────
         if len(captains) > 1:
             flash("Puoi selezionare un solo capitano C.")
             return redirect(url_for("coach_formation", match_id=match_id))
@@ -1962,20 +1990,102 @@ def coach_formation():
         """
     content = f"""
     <div class="card"><h2>Formazione partita</h2><form method="get"><label>Partita</label><select name="match_id" onchange="this.form.submit()">{match_options}</select></form></div>
-    <form method="post"><input type="hidden" name="match_id" value="{selected_match_id or ''}"><div class="card"><label>Risultato</label><input name="result" placeholder="es. 2-1" value="{selected_result or ''}"></div><div class="card"><h2>Giocatori</h2>{player_rows or 'Nessun giocatore.'}<button>Salva formazione</button></div></form><a class="btn btn-blue" href="/coach">Indietro</a>
+
+    <!-- Contatori in tempo reale -->
+    <div class="card" id="counters-card" style="padding:14px 18px;">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;text-align:center;">
+        <div>
+          <div id="cnt-conv" style="font-size:26px;font-weight:900;color:var(--gold-light)">0</div>
+          <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Convocati <span style="color:var(--muted)">/20</span></div>
+        </div>
+        <div>
+          <div id="cnt-tit" style="font-size:26px;font-weight:900;color:var(--green-bright)">0</div>
+          <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Titolari <span style="color:var(--muted)">/11</span></div>
+        </div>
+        <div>
+          <div id="cnt-sub" style="font-size:26px;font-weight:900;color:var(--blue)">0</div>
+          <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Subentrati <span style="color:var(--muted)">/5</span></div>
+        </div>
+      </div>
+      <div id="limit-warn" style="display:none;margin-top:10px;padding:8px 12px;border-radius:10px;background:rgba(224,53,53,.15);color:#fca5a5;font-weight:700;font-size:13px;text-align:center;"></div>
+    </div>
+
+    <form method="post" id="formation-form"><input type="hidden" name="match_id" value="{selected_match_id or ''}"><div class="card"><label>Risultato</label><input name="result" placeholder="es. 2-1" value="{selected_result or ''}"></div><div class="card"><h2>Giocatori</h2>{player_rows or 'Nessun giocatore.'}<button type="submit" id="submit-btn">Salva formazione</button></div></form><a class="btn btn-blue" href="/coach">Indietro</a>
     <script>
-    document.querySelectorAll('.exclusive-presence').forEach(function(cb) {{
-        cb.addEventListener('change', function() {{
-            if (!this.checked) return;
-            var pid = this.dataset.player;
-            var role = this.dataset.role;
-            var otherRole = role === 'starter' ? 'sub' : 'starter';
-            var other = document.querySelector('input[data-player="' + pid + '"][data-role="' + otherRole + '"]');
-            if (other) other.checked = false;
-            var play = document.querySelector('input[data-player="' + pid + '"][data-role="play"]');
-            if (play) play.checked = true;
+    (function() {{
+      var LIMITS = {{ conv: 20, tit: 11, sub: 5 }};
+
+      function updateCounters() {{
+        var conv = 0, tit = 0, sub = 0, titSenzaMinuti = 0;
+        var warnings = [];
+
+        document.querySelectorAll('input[name^="play_"]').forEach(function(cb) {{
+          if (cb.checked) conv++;
         }});
-    }});
+        document.querySelectorAll('input[name^="starter_"]').forEach(function(cb) {{
+          if (cb.checked) {{
+            tit++;
+            // controlla che il campo minuti di questo titolare sia >= 1
+            var pid = cb.name.replace('starter_','');
+            var mInput = document.querySelector('input[name="minutes_' + pid + '"]');
+            if (mInput && (parseInt(mInput.value) || 0) < 1) titSenzaMinuti++;
+          }}
+        }});
+        document.querySelectorAll('input[name^="sub_"]').forEach(function(cb) {{
+          if (cb.checked) sub++;
+        }});
+
+        var cConv = document.getElementById('cnt-conv');
+        var cTit  = document.getElementById('cnt-tit');
+        var cSub  = document.getElementById('cnt-sub');
+        cConv.textContent = conv;
+        cTit.textContent  = tit;
+        cSub.textContent  = sub;
+
+        cConv.style.color = conv > LIMITS.conv ? '#e03535' : 'var(--gold-light)';
+        cTit.style.color  = tit  > LIMITS.tit  ? '#e03535' : 'var(--green-bright)';
+        cSub.style.color  = sub  > LIMITS.sub  ? '#e03535' : 'var(--blue)';
+
+        if (conv > LIMITS.conv) warnings.push('Convocati: ' + conv + '/20 (max 20)');
+        if (tit  > LIMITS.tit)  warnings.push('Titolari: '  + tit  + '/11 (max 11)');
+        if (sub  > LIMITS.sub)  warnings.push('Subentrati: ' + sub + '/5 (max 5)');
+        if (titSenzaMinuti > 0) warnings.push(titSenzaMinuti + ' titolar' + (titSenzaMinuti===1?'e':'i') + ' con 0 minuti (min. 1)');
+
+        var warn = document.getElementById('limit-warn');
+        var btn  = document.getElementById('submit-btn');
+        if (warnings.length) {{
+          warn.textContent = '⚠ ' + warnings.join('  ·  ');
+          warn.style.display = 'block';
+          btn.style.opacity = '.45';
+          btn.style.cursor  = 'not-allowed';
+          btn.setAttribute('data-blocked', '1');
+        }} else {{
+          warn.style.display = 'none';
+          btn.style.opacity = '1';
+          btn.style.cursor  = '';
+          btn.removeAttribute('data-blocked');
+        }}
+      }}
+
+      // Intercetta submit se ci sono errori
+      document.getElementById('formation-form').addEventListener('submit', function(e) {{
+        var btn = document.getElementById('submit-btn');
+        if (btn.getAttribute('data-blocked')) {{
+          e.preventDefault();
+          document.getElementById('limit-warn').scrollIntoView({{behavior:'smooth',block:'center'}});
+        }}
+      }});
+
+      // Ascolta tutti i checkbox e i campi numerici del form
+      document.getElementById('formation-form').addEventListener('change', function(e) {{
+        if (e.target.type === 'checkbox') updateCounters();
+      }});
+      document.getElementById('formation-form').addEventListener('input', function(e) {{
+        if (e.target.type === 'number' && e.target.name && e.target.name.startsWith('minutes_')) updateCounters();
+      }});
+
+      updateCounters();
+    }})();
     </script>
     """
     return page("Formazione", "Gestione formazione e dati partita", content)

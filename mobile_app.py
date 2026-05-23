@@ -29,13 +29,27 @@ AUTHORIZED_COACH_PLAYER_ACCESS = {
     ("Lampos", "Lampos"),
 }
 
+# Presidente: accesso speciale con ruolo PRES.
+# Non compare mai nelle statistiche desktop né nella lista giocatori web.
+AUTHORIZED_PRES_ACCESS = {
+    ("Luca", "Milani"),
+}
+
 
 def _norm_name(value):
     return " ".join((value or "").strip().lower().split())
 
 
 def is_authorized_coach_name(first_name, last_name):
-    return (_norm_name(first_name), _norm_name(last_name)) in AUTHORIZED_COACH_PLAYER_ACCESS
+    return (_norm_name(first_name), _norm_name(last_name)) in {
+        (_norm_name(f), _norm_name(l)) for f, l in AUTHORIZED_COACH_PLAYER_ACCESS
+    }
+
+
+def is_authorized_pres_name(first_name, last_name):
+    return (_norm_name(first_name), _norm_name(last_name)) in {
+        (_norm_name(f), _norm_name(l)) for f, l in AUTHORIZED_PRES_ACCESS
+    }
 
 
 def get_or_create_coach_player(first_name, last_name):
@@ -54,6 +68,36 @@ def get_or_create_coach_player(first_name, last_name):
     db_query("""
         INSERT INTO players (first_name, last_name, birth_date, role)
         VALUES (?, ?, '', 'MISTER')
+    """, (first_name.strip().title(), last_name.strip().title()))
+
+    rows = db_query("""
+        SELECT id, first_name, last_name
+        FROM players
+        WHERE lower(trim(first_name))=lower(trim(?))
+          AND lower(trim(last_name))=lower(trim(?))
+        ORDER BY id DESC
+        LIMIT 1
+    """, (first_name, last_name), fetch=True)
+    return rows[0] if rows else None
+
+
+def get_or_create_pres_player(first_name, last_name):
+    """Crea (se non esiste) un record tecnico con ruolo PRES per il presidente."""
+    rows = db_query("""
+        SELECT id, first_name, last_name
+        FROM players
+        WHERE lower(trim(first_name))=lower(trim(?))
+          AND lower(trim(last_name))=lower(trim(?))
+        ORDER BY id
+        LIMIT 1
+    """, (first_name, last_name), fetch=True)
+
+    if rows:
+        return rows[0]
+
+    db_query("""
+        INSERT INTO players (first_name, last_name, birth_date, role)
+        VALUES (?, ?, '', 'PRES')
     """, (first_name.strip().title(), last_name.strip().title()))
 
     rows = db_query("""
@@ -1004,6 +1048,13 @@ def home():
                 LIMIT 1
             """, (first_name, last_name), fetch=True)
             is_coach_player_access = False
+            is_pres_player_access = False
+
+            if not player and is_authorized_pres_name(first_name, last_name):
+                pres_player = get_or_create_pres_player(first_name, last_name)
+                if pres_player:
+                    player = [pres_player]
+                    is_pres_player_access = True
 
             if not player and is_authorized_coach_name(first_name, last_name):
                 coach_player = get_or_create_coach_player(first_name, last_name)
@@ -1020,6 +1071,7 @@ def home():
             session["player_id"] = player[0]["id"]
             session["player_name"] = f"{player[0]['last_name']} {player[0]['first_name']}"
             session["is_coach_player_access"] = 1 if is_coach_player_access else 0
+            session["is_pres_player_access"] = 1 if is_pres_player_access else 0
             return redirect(url_for("player_home"))
         if mode == "coach":
             if request.form.get("password", "") != COACH_PASSWORD:
@@ -1110,7 +1162,21 @@ def player_home():
         </div>
         """
 
-    content = coach_access_note + """
+    pres_access_note = ""
+    if session.get("is_pres_player_access"):
+        pres_access_note = """
+        <div class="card">
+            <h2>Accesso presidente</h2>
+            <div class="small">Benvenuto presidente. Puoi consultare la sezione voti e le figurine speciali.</div>
+        </div>
+        """
+
+    # Il tasto "Storico prestazioni" è visibile solo ai calciatori normali,
+    # non ai mister né al presidente (non hanno presenze in distinta).
+    show_history = not session.get("is_coach_player_access") and not session.get("is_pres_player_access")
+    history_btn = '<a class="btn btn-dark" href="/player/history">Storico prestazioni</a>' if show_history else ""
+
+    content = pres_access_note + coach_access_note + f"""
     <div class="card">
         <h2>Foto figurina</h2>
         <form method="post" enctype="multipart/form-data">
@@ -1125,7 +1191,7 @@ def player_home():
         <h2>Voti partita</h2>
         <a class="btn btn-blue" href="/player/matches">Scegli partita da votare</a>
         <a class="btn btn-green" href="/player/card">Visualizza la mia figurina</a>
-        <a class="btn btn-dark" href="/player/history">Storico prestazioni</a>
+        {history_btn}
         <a class="btn" style="background:linear-gradient(135deg,#b8860b,#f5c518);color:#0a0a0a;font-weight:900;" href="/awards">⚡ Figurine Premi</a>
         <a class="btn" href="/logout">Esci</a>
     </div>

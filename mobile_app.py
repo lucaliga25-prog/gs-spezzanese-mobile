@@ -335,6 +335,7 @@ def get_players():
     return db_query("""
         SELECT id, first_name, last_name, role
         FROM players
+        WHERE LOWER(TRIM(COALESCE(role, ''))) NOT IN ('mister', 'pres')
         ORDER BY last_name, first_name
     """, fetch=True)
 

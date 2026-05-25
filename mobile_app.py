@@ -1144,7 +1144,7 @@ def home():
             session["is_pres_player_access"] = 1 if is_pres_player_access else 0
             return redirect(url_for("player_home"))
         if mode == "coach":
-            if request.form.get("password", "") != COACH_PASSWORD:
+            if request.form.get("password", "") != APP_PASSWORD:
                 flash("Password allenatore errata.")
                 return redirect(url_for("home"))
             session.clear()

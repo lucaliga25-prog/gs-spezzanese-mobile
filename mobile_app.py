@@ -586,13 +586,10 @@ def _render_month_card(p):
         player_img_svg = '<text x="150" y="188" font-size="54" text-anchor="middle">&#x1F464;</text>'
         player_ring_svg = ''
 
-    # Statistiche aggregate del mese (se disponibili nel dict)
-    vel = p.get('vel', '—')
-    tir = p.get('tir', '—')
-    pas = p.get('pas', '—')
-    dri = p.get('dri', '—')
-    dif = p.get('dif', '—')
-    fis = p.get('fis', '—')
+    stat_presenze = p.get('stat_presenze', 0)
+    stat_minuti   = p.get('stat_minuti', 0)
+    stat_gol      = p.get('stat_gol', 0)
+    stat_assist   = p.get('stat_assist', 0)
     try:
         stars = min(5, max(1, round((float(score) - 4) / 1.2)))
     except Exception:

@@ -1116,7 +1116,7 @@ def awards():
                 letter-spacing:.6px;margin-bottom:10px;">⚡ Man of the Match</div>
     {week_html}
     <div style="font-size:13px;color:#64748b;font-weight:700;text-transform:uppercase;
-                letter-spacing:.6px;margin:16px 0 10px;">🏆 Giocatore del Mese</div>
+                letter-spacing:.6px;margin:16px 0 10px;">🏆 Man of the Month</div>
     {month_html}
     <a class="btn btn-blue" href="{back_url}">Indietro</a>
     """

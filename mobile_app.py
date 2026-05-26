@@ -375,6 +375,22 @@ def last_match():
 # AWARD HELPERS — una sola query al DB per ciascuna funzione
 # ---------------------------------------------------------------------------
 
+# Cache semplice per le query award: si invalida ogni ora
+# evita di rieseguire le query ad ogni page load sulla pagina /awards
+_award_cache = {}
+_AWARD_CACHE_TTL = 3600  # secondi
+
+def _award_cached(key, fn):
+    """Esegue fn() e memorizza il risultato per TTL secondi."""
+    import time
+    entry = _award_cache.get(key)
+    if entry and time.time() - entry['ts'] < _AWARD_CACHE_TTL:
+        return entry['val']
+    val = fn()
+    _award_cache[key] = {'val': val, 'ts': time.time()}
+    return val
+
+
 def get_best_player_last_match():
     """Giocatore con media voto più alta nell'ultima partita (CTE, 1 query)."""
     rows = db_query("""
@@ -483,7 +499,7 @@ def _render_week_card(p):
             ' clip-path="url(#player-circle-motw)"'
             ' preserveAspectRatio="xMidYMid slice"/>'
         )
-        player_ring_svg = '<circle cx="150" cy="170" r="56" fill="none" stroke="url(#brdg)" stroke-width="2.5"/>'
+        player_ring_svg = '<circle cx="150" cy="215" r="53" fill="none" stroke="url(#brdg)" stroke-width="2.5"/>'
     else:
         player_img_svg = '<text x="150" y="190" font-size="54" text-anchor="middle">&#x1F464;</text>'
         player_ring_svg = ''
@@ -499,7 +515,7 @@ def _render_week_card(p):
     <defs>
       <clipPath id="motw-clip"><path d="M20,32 Q20,14 38,14 L130,14 L150,2 L170,14 L262,14 Q280,14 280,32 L280,356 Q280,374 264,374 L198,374 L150,392 L102,374 L36,374 Q20,374 20,356 Z"/></clipPath>
       <clipPath id="logo-circle-motw"><circle cx="150" cy="49" r="33"/></clipPath>
-      <clipPath id="player-circle-motw"><circle cx="150" cy="170" r="55"/></clipPath>
+      <clipPath id="player-circle-motw"><circle cx="150" cy="215" r="52"/></clipPath>
       <linearGradient id="bg-motw" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#0a0906"/><stop offset="100%" stop-color="#080705"/></linearGradient>
       <linearGradient id="gm1" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#3a2a00" stop-opacity="0"/><stop offset="20%" stop-color="#a07818"/><stop offset="42%" stop-color="#e8c840"/><stop offset="55%" stop-color="#f5e060"/><stop offset="70%" stop-color="#d4a820"/><stop offset="85%" stop-color="#8a6010"/><stop offset="100%" stop-color="#3a2800" stop-opacity="0"/></linearGradient>
       <linearGradient id="gm2" x1="5%" y1="0%" x2="95%" y2="100%"><stop offset="0%" stop-color="#2a1e00" stop-opacity="0"/><stop offset="25%" stop-color="#b89020"/><stop offset="50%" stop-color="#ead848"/><stop offset="75%" stop-color="#a07010"/><stop offset="100%" stop-color="#2a1e00" stop-opacity="0"/></linearGradient>
@@ -536,7 +552,7 @@ def _render_week_card(p):
     <circle cx="150" cy="49" r="33" fill="#0a0906"/>
     <image href="data:image/jpeg;base64,{logo_b64_local}" x="117" y="16" width="66" height="66" clip-path="url(#logo-circle-motw)" preserveAspectRatio="xMidYMid slice"/>
     <circle cx="150" cy="49" r="37" fill="none" stroke="url(#lrm)" stroke-width="1.5"/>
-    <circle cx="150" cy="170" r="55" fill="#0a0906" opacity="0.6"/>
+    <circle cx="150" cy="215" r="52" fill="#0a0906" opacity="0.6"/>
     {player_img_svg}
     {player_ring_svg}
     <g clip-path="url(#motw-clip)">
@@ -581,7 +597,7 @@ def _render_month_card(p):
             ' clip-path="url(#player-circle-potm)"'
             ' preserveAspectRatio="xMidYMid slice"/>'
         )
-        player_ring_svg = '<circle cx="150" cy="168" r="56" fill="none" stroke="url(#brd-bl)" stroke-width="2.5"/>'
+        player_ring_svg = '<circle cx="150" cy="213" r="53" fill="none" stroke="url(#brd-bl)" stroke-width="2.5"/>'
     else:
         player_img_svg = '<text x="150" y="188" font-size="54" text-anchor="middle">&#x1F464;</text>'
         player_ring_svg = ''
@@ -601,7 +617,7 @@ def _render_month_card(p):
     <defs>
       <clipPath id="potm-clip"><path d="M22,28 Q22,12 38,12 L138,12 L150,0 L162,12 L262,12 Q278,12 278,28 L278,318 Q278,360 250,378 L150,400 L50,378 Q22,360 22,318 Z"/></clipPath>
       <clipPath id="logo-circle-potm"><circle cx="150" cy="47" r="33"/></clipPath>
-      <clipPath id="player-circle-potm"><circle cx="150" cy="168" r="55"/></clipPath>
+      <clipPath id="player-circle-potm"><circle cx="150" cy="213" r="52"/></clipPath>
       <linearGradient id="potm-bg" x1="10%" y1="0%" x2="90%" y2="100%"><stop offset="0%" stop-color="#1535d8"/><stop offset="40%" stop-color="#1a42e8"/><stop offset="70%" stop-color="#2252f5"/><stop offset="100%" stop-color="#1030c8"/></linearGradient>
       <linearGradient id="dark-ar" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#040c28"/><stop offset="100%" stop-color="#081638"/></linearGradient>
       <linearGradient id="brd-bl" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#70b0ff"/><stop offset="30%" stop-color="#3878e8"/><stop offset="65%" stop-color="#1a50c0"/><stop offset="100%" stop-color="#50a0f8"/></linearGradient>
@@ -645,7 +661,7 @@ def _render_month_card(p):
     <circle cx="150" cy="47" r="32" fill="#040c28"/>
     <image href="data:image/jpeg;base64,{logo_b64_local}" x="117" y="14" width="66" height="66" clip-path="url(#logo-circle-potm)" preserveAspectRatio="xMidYMid slice"/>
     <circle cx="150" cy="47" r="36" fill="none" stroke="url(#lrp)" stroke-width="1.5"/>
-    <circle cx="150" cy="168" r="55" fill="#040c28" opacity="0.55"/>
+    <circle cx="150" cy="213" r="52" fill="#040c28" opacity="0.55"/>
     {player_img_svg}
     {player_ring_svg}
     <g clip-path="url(#potm-clip)">
@@ -1079,8 +1095,8 @@ def logout():
 @login_required()
 def awards():
     """Figurine speciali: miglior giocatore dell'ultima partita e del mese scorso."""
-    week_player = get_best_player_last_match()
-    month_player = get_best_player_last_month()
+    week_player  = _award_cached("week",  get_best_player_last_match)
+    month_player = _award_cached("month", get_best_player_last_month)
 
     week_html = _render_week_card(week_player) if week_player else (
         "<div class='card' style='text-align:center;color:#888;padding:24px'>"

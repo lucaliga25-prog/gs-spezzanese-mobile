@@ -398,10 +398,15 @@ def get_best_player_last_match():
             lm.match_date,
             lm.opponent,
             ROUND(AVG(v.rating)::numeric, 2) AS media_voto,
-            COUNT(v.id) AS num_voti
+            COUNT(v.id) AS num_voti,
+            COALESCE(SUM(a.goals),0)   AS stat_gol,
+            COALESCE(SUM(a.assists),0) AS stat_assist,
+            COALESCE(SUM(a.minutes),0) AS stat_minuti,
+            COUNT(a.id)                AS stat_presenze
         FROM last_m lm
         JOIN player_votes v ON v.match_id = lm.match_id
         JOIN players p ON p.id = v.voted_player_id
+        LEFT JOIN appearances a ON a.player_id = p.id
         GROUP BY p.id, p.first_name, p.last_name, p.role,
                  p.photo_data, p.photo_mime, lm.match_date, lm.opponent
         ORDER BY media_voto DESC, num_voti DESC
@@ -426,15 +431,24 @@ def get_best_player_last_month():
             COALESCE(p.photo_data,'') AS photo_data,
             COALESCE(p.photo_mime,'image/jpeg') AS photo_mime,
             ROUND(AVG(v.rating)::numeric, 2) AS media_voto,
-            COUNT(v.id) AS num_voti
+            COUNT(v.id) AS num_voti,
+            COALESCE(SUM(CASE WHEN m.match_date BETWEEN ? AND ? THEN a.goals   ELSE 0 END),0) AS stat_gol,
+            COALESCE(SUM(CASE WHEN m.match_date BETWEEN ? AND ? THEN a.assists ELSE 0 END),0) AS stat_assist,
+            COALESCE(SUM(CASE WHEN m.match_date BETWEEN ? AND ? THEN a.minutes ELSE 0 END),0) AS stat_minuti,
+            COUNT(DISTINCT CASE WHEN m.match_date BETWEEN ? AND ? THEN a.match_id END)        AS stat_presenze
         FROM player_votes v
         JOIN matches m ON m.id = v.match_id
         JOIN players p ON p.id = v.voted_player_id
+        LEFT JOIN appearances a ON a.player_id = p.id
         WHERE m.match_date BETWEEN ? AND ?
         GROUP BY p.id, p.first_name, p.last_name, p.role, p.photo_data, p.photo_mime
         ORDER BY media_voto DESC, num_voti DESC
         LIMIT 1
-    """, (last_month_start.isoformat(), last_month_end.isoformat()), fetch=True)
+    """, (last_month_start.isoformat(), last_month_end.isoformat(),
+         last_month_start.isoformat(), last_month_end.isoformat(),
+         last_month_start.isoformat(), last_month_end.isoformat(),
+         last_month_start.isoformat(), last_month_end.isoformat(),
+         last_month_start.isoformat(), last_month_end.isoformat()), fetch=True)
 
     if rows:
         rows[0]["month_label"] = last_month_end.strftime("%B %Y")
@@ -457,6 +471,23 @@ def _render_week_card(p):
     match_info = f"{ui_date(p['match_date'])} · {p['opponent']}"
     score = p['media_voto']
     logo_b64_local = LOGO_B64
+    stat_presenze = p.get('stat_presenze', 0)
+    stat_minuti   = p.get('stat_minuti', 0)
+    stat_gol      = p.get('stat_gol', 0)
+    stat_assist   = p.get('stat_assist', 0)
+    # Foto giocatore centrale
+    if p.get("photo_data"):
+        player_img_svg = (
+            f'<image href="data:{p["photo_mime"]};base64,{p["photo_data"]}"'
+            ' x="95" y="115" width="110" height="110"'
+            ' clip-path="url(#player-circle-motw)"'
+            ' preserveAspectRatio="xMidYMid slice"/>'
+        )
+        player_ring_svg = '<circle cx="150" cy="170" r="56" fill="none" stroke="url(#brdg)" stroke-width="2.5"/>'
+    else:
+        player_img_svg = '<text x="150" y="190" font-size="54" text-anchor="middle">&#x1F464;</text>'
+        player_ring_svg = ''
+
     try:
         stars = min(5, max(1, round((float(score) - 4) / 1.2)))
     except Exception:
@@ -468,6 +499,7 @@ def _render_week_card(p):
     <defs>
       <clipPath id="motw-clip"><path d="M20,32 Q20,14 38,14 L130,14 L150,2 L170,14 L262,14 Q280,14 280,32 L280,356 Q280,374 264,374 L198,374 L150,392 L102,374 L36,374 Q20,374 20,356 Z"/></clipPath>
       <clipPath id="logo-circle-motw"><circle cx="150" cy="49" r="33"/></clipPath>
+      <clipPath id="player-circle-motw"><circle cx="150" cy="170" r="55"/></clipPath>
       <linearGradient id="bg-motw" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#0a0906"/><stop offset="100%" stop-color="#080705"/></linearGradient>
       <linearGradient id="gm1" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#3a2a00" stop-opacity="0"/><stop offset="20%" stop-color="#a07818"/><stop offset="42%" stop-color="#e8c840"/><stop offset="55%" stop-color="#f5e060"/><stop offset="70%" stop-color="#d4a820"/><stop offset="85%" stop-color="#8a6010"/><stop offset="100%" stop-color="#3a2800" stop-opacity="0"/></linearGradient>
       <linearGradient id="gm2" x1="5%" y1="0%" x2="95%" y2="100%"><stop offset="0%" stop-color="#2a1e00" stop-opacity="0"/><stop offset="25%" stop-color="#b89020"/><stop offset="50%" stop-color="#ead848"/><stop offset="75%" stop-color="#a07010"/><stop offset="100%" stop-color="#2a1e00" stop-opacity="0"/></linearGradient>
@@ -504,13 +536,23 @@ def _render_week_card(p):
     <circle cx="150" cy="49" r="33" fill="#0a0906"/>
     <image href="data:image/jpeg;base64,{logo_b64_local}" x="117" y="16" width="66" height="66" clip-path="url(#logo-circle-motw)" preserveAspectRatio="xMidYMid slice"/>
     <circle cx="150" cy="49" r="37" fill="none" stroke="url(#lrm)" stroke-width="1.5"/>
+    <circle cx="150" cy="170" r="55" fill="#0a0906" opacity="0.6"/>
+    {player_img_svg}
+    {player_ring_svg}
     <g clip-path="url(#motw-clip)">
       <text x="36" y="148" font-family="Arial Black,sans-serif" font-weight="900" font-size="46" fill="white">{score}</text>
       <text x="48" y="170" font-family="Arial,sans-serif" font-weight="700" font-size="14" fill="white" opacity="0.72" letter-spacing="1">{role_display}</text>
       <text x="150" y="300" font-family="Arial Black,sans-serif" font-weight="900" font-size="15" fill="white" text-anchor="middle" letter-spacing="2">{last} {first}</text>
-      <text x="150" y="318" font-family="Arial,sans-serif" font-weight="700" font-size="10" fill="#c9a030" text-anchor="middle" letter-spacing="3">MAN OF THE MATCH</text>
-      <text x="52"  y="338" font-size="9"  fill="#c9a030" font-family="Arial" font-weight="700" text-anchor="middle">PARTITA</text>
-      <text x="150" y="338" font-size="9"  fill="#c9a030" font-family="Arial" font-weight="700" text-anchor="middle">{match_info}</text>
+      <text x="150" y="316" font-family="Arial,sans-serif" font-weight="700" font-size="10" fill="#c9a030" text-anchor="middle" letter-spacing="3">MAN OF THE MATCH</text>
+      <line x1="30" y1="325" x2="270" y2="325" stroke="#c9a030" stroke-width="0.6" opacity="0.4"/>
+      <text x="60"  y="338" font-size="9" fill="#c9a030" font-family="Arial" font-weight="600" text-anchor="middle" opacity="0.8">PRES</text>
+      <text x="120" y="338" font-size="9" fill="#c9a030" font-family="Arial" font-weight="600" text-anchor="middle" opacity="0.8">MIN</text>
+      <text x="180" y="338" font-size="9" fill="#c9a030" font-family="Arial" font-weight="600" text-anchor="middle" opacity="0.8">GOL</text>
+      <text x="240" y="338" font-size="9" fill="#c9a030" font-family="Arial" font-weight="600" text-anchor="middle" opacity="0.8">ASS</text>
+      <text x="60"  y="356" font-size="16" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{stat_presenze}</text>
+      <text x="120" y="356" font-size="16" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{stat_minuti}</text>
+      <text x="180" y="356" font-size="16" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{stat_gol}</text>
+      <text x="240" y="356" font-size="16" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{stat_assist}</text>
     </g>
     </svg>
     </div>"""
@@ -531,6 +573,19 @@ def _render_month_card(p):
     month_label = p.get("month_label", "")
     score = p['media_voto']
     logo_b64_local = LOGO_B64
+    # Foto giocatore centrale
+    if p.get("photo_data"):
+        player_img_svg = (
+            f'<image href="data:{p["photo_mime"]};base64,{p["photo_data"]}"'
+            ' x="95" y="113" width="110" height="110"'
+            ' clip-path="url(#player-circle-potm)"'
+            ' preserveAspectRatio="xMidYMid slice"/>'
+        )
+        player_ring_svg = '<circle cx="150" cy="168" r="56" fill="none" stroke="url(#brd-bl)" stroke-width="2.5"/>'
+    else:
+        player_img_svg = '<text x="150" y="188" font-size="54" text-anchor="middle">&#x1F464;</text>'
+        player_ring_svg = ''
+
     # Statistiche aggregate del mese (se disponibili nel dict)
     vel = p.get('vel', '—')
     tir = p.get('tir', '—')
@@ -549,6 +604,7 @@ def _render_month_card(p):
     <defs>
       <clipPath id="potm-clip"><path d="M22,28 Q22,12 38,12 L138,12 L150,0 L162,12 L262,12 Q278,12 278,28 L278,318 Q278,360 250,378 L150,400 L50,378 Q22,360 22,318 Z"/></clipPath>
       <clipPath id="logo-circle-potm"><circle cx="150" cy="47" r="33"/></clipPath>
+      <clipPath id="player-circle-potm"><circle cx="150" cy="168" r="55"/></clipPath>
       <linearGradient id="potm-bg" x1="10%" y1="0%" x2="90%" y2="100%"><stop offset="0%" stop-color="#1535d8"/><stop offset="40%" stop-color="#1a42e8"/><stop offset="70%" stop-color="#2252f5"/><stop offset="100%" stop-color="#1030c8"/></linearGradient>
       <linearGradient id="dark-ar" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#040c28"/><stop offset="100%" stop-color="#081638"/></linearGradient>
       <linearGradient id="brd-bl" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#70b0ff"/><stop offset="30%" stop-color="#3878e8"/><stop offset="65%" stop-color="#1a50c0"/><stop offset="100%" stop-color="#50a0f8"/></linearGradient>
@@ -592,23 +648,23 @@ def _render_month_card(p):
     <circle cx="150" cy="47" r="32" fill="#040c28"/>
     <image href="data:image/jpeg;base64,{logo_b64_local}" x="117" y="14" width="66" height="66" clip-path="url(#logo-circle-potm)" preserveAspectRatio="xMidYMid slice"/>
     <circle cx="150" cy="47" r="36" fill="none" stroke="url(#lrp)" stroke-width="1.5"/>
+    <circle cx="150" cy="168" r="55" fill="#040c28" opacity="0.55"/>
+    {player_img_svg}
+    {player_ring_svg}
     <g clip-path="url(#potm-clip)">
       <text x="36" y="152" font-family="Arial Black,sans-serif" font-weight="900" font-size="46" fill="white">{score}</text>
       <text x="48" y="174" font-family="Arial,sans-serif" font-weight="700" font-size="14" fill="white" opacity="0.75" letter-spacing="1">{role_display}</text>
       <text x="150" y="298" font-family="Arial Black,sans-serif" font-weight="900" font-size="15" fill="white" text-anchor="middle" letter-spacing="2">{last} {first}</text>
       <text x="150" y="316" font-family="Arial,sans-serif" font-weight="700" font-size="10" fill="#00d8ff" text-anchor="middle" letter-spacing="3">POTM · {month_label}</text>
-      <text x="52"  y="338" font-size="9" fill="white" font-family="Arial" font-weight="700" text-anchor="middle" opacity="0.7">VEL</text>
-      <text x="94"  y="338" font-size="9" fill="white" font-family="Arial" font-weight="700" text-anchor="middle" opacity="0.7">TIR</text>
-      <text x="136" y="338" font-size="9" fill="white" font-family="Arial" font-weight="700" text-anchor="middle" opacity="0.7">PAS</text>
-      <text x="178" y="338" font-size="9" fill="white" font-family="Arial" font-weight="700" text-anchor="middle" opacity="0.7">DRI</text>
-      <text x="220" y="338" font-size="9" fill="white" font-family="Arial" font-weight="700" text-anchor="middle" opacity="0.7">DIF</text>
-      <text x="258" y="338" font-size="9" fill="white" font-family="Arial" font-weight="700" text-anchor="middle" opacity="0.7">FIS</text>
-      <text x="52"  y="358" font-size="18" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{vel}</text>
-      <text x="94"  y="358" font-size="18" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{tir}</text>
-      <text x="136" y="358" font-size="18" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{pas}</text>
-      <text x="178" y="358" font-size="18" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{dri}</text>
-      <text x="220" y="358" font-size="18" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{dif}</text>
-      <text x="258" y="358" font-size="18" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{fis}</text>
+      <line x1="30" y1="328" x2="270" y2="328" stroke="#00d8ff" stroke-width="0.6" opacity="0.4"/>
+      <text x="60"  y="340" font-size="9" fill="#00d8ff" font-family="Arial" font-weight="600" text-anchor="middle" opacity="0.85">PRES</text>
+      <text x="120" y="340" font-size="9" fill="#00d8ff" font-family="Arial" font-weight="600" text-anchor="middle" opacity="0.85">MIN</text>
+      <text x="180" y="340" font-size="9" fill="#00d8ff" font-family="Arial" font-weight="600" text-anchor="middle" opacity="0.85">GOL</text>
+      <text x="240" y="340" font-size="9" fill="#00d8ff" font-family="Arial" font-weight="600" text-anchor="middle" opacity="0.85">ASS</text>
+      <text x="60"  y="360" font-size="17" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{stat_presenze}</text>
+      <text x="120" y="360" font-size="17" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{stat_minuti}</text>
+      <text x="180" y="360" font-size="17" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{stat_gol}</text>
+      <text x="240" y="360" font-size="17" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{stat_assist}</text>
     </g>
     </svg>
     </div>"""

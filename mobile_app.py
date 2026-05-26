@@ -499,7 +499,7 @@ def _render_week_card(p):
             ' clip-path="url(#player-circle-motw)"'
             ' preserveAspectRatio="xMidYMid slice"/>'
         )
-        player_ring_svg = '<circle cx="150" cy="215" r="53" fill="none" stroke="url(#brdg)" stroke-width="2.5"/>'
+        player_ring_svg = '<circle cx="150" cy="210" r="53" fill="none" stroke="url(#brdg)" stroke-width="2.5"/>'
     else:
         player_img_svg = '<text x="150" y="190" font-size="54" text-anchor="middle">&#x1F464;</text>'
         player_ring_svg = ''

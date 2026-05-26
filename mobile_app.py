@@ -463,28 +463,57 @@ def _render_week_card(p):
         stars = 3
     stars_html = "★" * stars + "☆" * (5 - stars)
 
-    return f"""
-    <div class="award-card-week">
-      <div class="fut-header">
-        <div class="fut-type">⚡ Man of the Match</div>
-        <div class="fut-badge">⭐ MOTM · Partita</div>
-      </div>
-      <span class="lightning left">⚡</span>
-      <span class="lightning right">⚡</span>
-      <div class="fut-body">
-        <div class="fut-photo-wrap">
-          <div class="fut-photo-ring">{photo_html}</div>
-        </div>
-        <div class="fut-stars">{stars_html}</div>
-        <div class="award-score">{score}</div>
-        <div class="fut-score-label">Media voto</div>
-        <div class="fut-divider"></div>
-        <div class="award-name">{last} {first}</div>
-        <div class="fut-role-pill">{role_display}</div>
-        <div class="award-meta">{match_info}</div>
-      </div>
-    </div>
-    """
+    return f"""    <div class="award-card-wrap">
+    <svg viewBox="0 0 300 400" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <clipPath id="motw-clip"><path d="M20,32 Q20,14 38,14 L130,14 L150,2 L170,14 L262,14 Q280,14 280,32 L280,356 Q280,374 264,374 L198,374 L150,392 L102,374 L36,374 Q20,374 20,356 Z"/></clipPath>
+      <clipPath id="logo-circle-motw"><circle cx="150" cy="49" r="33"/></clipPath>
+      <linearGradient id="bg-motw" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#0a0906"/><stop offset="100%" stop-color="#080705"/></linearGradient>
+      <linearGradient id="gm1" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#3a2a00" stop-opacity="0"/><stop offset="20%" stop-color="#a07818"/><stop offset="42%" stop-color="#e8c840"/><stop offset="55%" stop-color="#f5e060"/><stop offset="70%" stop-color="#d4a820"/><stop offset="85%" stop-color="#8a6010"/><stop offset="100%" stop-color="#3a2800" stop-opacity="0"/></linearGradient>
+      <linearGradient id="gm2" x1="5%" y1="0%" x2="95%" y2="100%"><stop offset="0%" stop-color="#2a1e00" stop-opacity="0"/><stop offset="25%" stop-color="#b89020"/><stop offset="50%" stop-color="#ead848"/><stop offset="75%" stop-color="#a07010"/><stop offset="100%" stop-color="#2a1e00" stop-opacity="0"/></linearGradient>
+      <linearGradient id="gm3" x1="0%" y1="10%" x2="100%" y2="90%"><stop offset="0%" stop-color="#1a1000" stop-opacity="0"/><stop offset="30%" stop-color="#c09828"/><stop offset="55%" stop-color="#f0d850"/><stop offset="80%" stop-color="#906808"/><stop offset="100%" stop-color="#1a1000" stop-opacity="0"/></linearGradient>
+      <linearGradient id="brdg" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#f0d860"/><stop offset="25%" stop-color="#c9a030"/><stop offset="50%" stop-color="#906800"/><stop offset="75%" stop-color="#c09020"/><stop offset="100%" stop-color="#e8c840"/></linearGradient>
+      <radialGradient id="gspot-m" cx="52%" cy="42%" r="40%"><stop offset="0%" stop-color="#d4a800" stop-opacity="0.18"/><stop offset="100%" stop-color="#000" stop-opacity="0"/></radialGradient>
+      <linearGradient id="divg" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#c9a030" stop-opacity="0"/><stop offset="20%" stop-color="#c9a030" stop-opacity="0.9"/><stop offset="80%" stop-color="#c9a030" stop-opacity="0.9"/><stop offset="100%" stop-color="#c9a030" stop-opacity="0"/></linearGradient>
+      <linearGradient id="lrm" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#f0d860"/><stop offset="50%" stop-color="#c9a030"/><stop offset="100%" stop-color="#e8c840"/></linearGradient>
+    </defs>
+    <g clip-path="url(#motw-clip)">
+      <rect width="300" height="400" fill="url(#bg-motw)"/>
+      <g fill="none" opacity="0.35">
+        <path d="M-10,290 Q60,260 130,275 Q200,290 270,258" stroke="#1c1800" stroke-width="10"/>
+        <path d="M-10,310 Q70,278 145,295 Q215,310 285,278" stroke="#181400" stroke-width="8"/>
+        <path d="M-10,330 Q55,298 125,312 Q195,326 265,295" stroke="#201c00" stroke-width="7"/>
+        <path d="M-10,268 Q65,238 140,254 Q208,268 278,238" stroke="#161200" stroke-width="9"/>
+        <path d="M20,248 Q80,220 155,235 Q220,248 280,220" stroke="#141000" stroke-width="6"/>
+        <path d="M-10,350 Q60,318 130,333 Q200,348 268,316" stroke="#1a1600" stroke-width="6"/>
+        <path d="M10,370 Q75,338 148,353 Q214,366 278,336" stroke="#181400" stroke-width="5"/>
+        <path d="M-10,80 Q60,55 130,68 Q200,80 268,55" stroke="#141000" stroke-width="5" opacity="0.5"/>
+        <path d="M-10,100 Q55,76 125,88 Q195,100 265,76" stroke="#121000" stroke-width="4" opacity="0.4"/>
+      </g>
+      <rect width="300" height="400" fill="url(#gspot-m)"/>
+      <path d="M-30,172 C30,138 95,152 160,118 C218,88 256,58 316,32 L316,68 C262,92 226,122 168,154 C104,188 42,175 -30,210 Z" fill="url(#gm1)" opacity="0.94"/>
+      <path d="M-30,210 C42,175 104,188 168,154 C226,122 262,92 316,68 L316,76 C260,100 224,132 166,164 C100,198 38,185 -30,220 Z" fill="#060504" opacity="0.96"/>
+      <path d="M-30,220 C38,185 100,198 166,164 C224,132 260,100 316,76 L316,112 C266,134 232,166 172,200 C110,232 48,220 -30,256 Z" fill="url(#gm2)" opacity="0.88"/>
+      <path d="M-30,256 C48,220 110,232 172,200 C232,166 266,134 316,112 L316,120 C264,142 230,175 170,208 C108,241 46,229 -30,265 Z" fill="#060504" opacity="0.94"/>
+      <path d="M20,148 C80,118 138,130 194,100 C242,74 272,48 320,28 L320,42 C274,62 244,88 196,116 C140,146 82,134 20,164 Z" fill="url(#gm3)" opacity="0.72"/>
+      <rect x="20" y="266" width="260" height="1.5" fill="url(#divg)"/>
+    </g>
+    <path d="M20,32 Q20,14 38,14 L130,14 L150,2 L170,14 L262,14 Q280,14 280,32 L280,356 Q280,374 264,374 L198,374 L150,392 L102,374 L36,374 Q20,374 20,356 Z" fill="none" stroke="url(#brdg)" stroke-width="3"/>
+    <path d="M24,33 Q24,18 39,18 L131,18 L150,7 L169,18 L261,18 Q276,18 276,33 L276,355 Q276,370 262,370 L197,370 L150,388 L103,370 L38,370 Q24,370 24,355 Z" fill="none" stroke="#c9a030" stroke-width="0.8" opacity="0.3"/>
+    <circle cx="150" cy="49" r="37" fill="url(#lrm)"/>
+    <circle cx="150" cy="49" r="33" fill="#0a0906"/>
+    <image href="data:image/jpeg;base64,{LOGO_B64}" x="117" y="16" width="66" height="66" clip-path="url(#logo-circle-motw)" preserveAspectRatio="xMidYMid slice"/>
+    <circle cx="150" cy="49" r="37" fill="none" stroke="url(#lrm)" stroke-width="1.5"/>
+    <g clip-path="url(#motw-clip)">
+      <text x="36" y="148" font-family="Arial Black,sans-serif" font-weight="900" font-size="46" fill="white">{score}</text>
+      <text x="48" y="170" font-family="Arial,sans-serif" font-weight="700" font-size="14" fill="white" opacity="0.72" letter-spacing="1">{role_display}</text>
+      <text x="150" y="300" font-family="Arial Black,sans-serif" font-weight="900" font-size="15" fill="white" text-anchor="middle" letter-spacing="2">{last} {first}</text>
+      <text x="150" y="318" font-family="Arial,sans-serif" font-weight="700" font-size="10" fill="#c9a030" text-anchor="middle" letter-spacing="3">MAN OF THE MATCH</text>
+      <text x="52"  y="338" font-size="9"  fill="#c9a030" font-family="Arial" font-weight="700" text-anchor="middle">PARTITA</text>
+      <text x="150" y="338" font-size="9"  fill="#c9a030" font-family="Arial" font-weight="700" text-anchor="middle">{match_info}</text>
+    </g>
+    </svg>
+    </div>"""
 
 
 def _render_month_card(p):
@@ -507,25 +536,74 @@ def _render_month_card(p):
         stars = 3
     stars_html = "★" * stars + "☆" * (5 - stars)
 
-    return f"""
-    <div class="award-card-month">
-      <div class="fut-header">
-        <div class="fut-type">🏆 Giocatore del Mese</div>
-        <div class="fut-badge">🥇 POTM · {month_label}</div>
-      </div>
-      <div class="fut-body">
-        <div class="fut-photo-wrap">
-          <div class="fut-photo-ring">{photo_html}</div>
-        </div>
-        <div class="fut-stars">{stars_html}</div>
-        <div class="award-score">{score}</div>
-        <div class="fut-score-label">Media voto</div>
-        <div class="fut-divider"></div>
-        <div class="award-name">{last} {first}</div>
-        <div class="fut-role-pill">{role_display}</div>
-      </div>
-    </div>
-    """
+    return f"""    <div class="award-card-wrap">
+    <svg viewBox="0 0 300 400" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <clipPath id="potm-clip"><path d="M22,28 Q22,12 38,12 L138,12 L150,0 L162,12 L262,12 Q278,12 278,28 L278,318 Q278,360 250,378 L150,400 L50,378 Q22,360 22,318 Z"/></clipPath>
+      <clipPath id="logo-circle-potm"><circle cx="150" cy="47" r="33"/></clipPath>
+      <linearGradient id="potm-bg" x1="10%" y1="0%" x2="90%" y2="100%"><stop offset="0%" stop-color="#1535d8"/><stop offset="40%" stop-color="#1a42e8"/><stop offset="70%" stop-color="#2252f5"/><stop offset="100%" stop-color="#1030c8"/></linearGradient>
+      <linearGradient id="dark-ar" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#040c28"/><stop offset="100%" stop-color="#081638"/></linearGradient>
+      <linearGradient id="brd-bl" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#70b0ff"/><stop offset="30%" stop-color="#3878e8"/><stop offset="65%" stop-color="#1a50c0"/><stop offset="100%" stop-color="#50a0f8"/></linearGradient>
+      <linearGradient id="div-b" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#00d8ff" stop-opacity="0.05"/><stop offset="20%" stop-color="#00d8ff" stop-opacity="0.85"/><stop offset="80%" stop-color="#00d8ff" stop-opacity="0.85"/><stop offset="100%" stop-color="#00d8ff" stop-opacity="0.05"/></linearGradient>
+      <radialGradient id="pglow" cx="72%" cy="30%" r="50%"><stop offset="0%" stop-color="#5080ff" stop-opacity="0.5"/><stop offset="60%" stop-color="#2040c0" stop-opacity="0.12"/><stop offset="100%" stop-color="#1020a0" stop-opacity="0"/></radialGradient>
+      <radialGradient id="rglow" cx="28%" cy="78%" r="52%"><stop offset="0%" stop-color="#cc0028" stop-opacity="0.38"/><stop offset="100%" stop-color="#800018" stop-opacity="0"/></radialGradient>
+      <linearGradient id="racc" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#ee0030" stop-opacity="0.92"/><stop offset="100%" stop-color="#880018" stop-opacity="0.5"/></linearGradient>
+      <linearGradient id="lrp" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#ee0030"/><stop offset="40%" stop-color="#1a42e8"/><stop offset="100%" stop-color="#00d8ff"/></linearGradient>
+    </defs>
+    <g clip-path="url(#potm-clip)">
+      <rect width="300" height="400" fill="url(#potm-bg)"/>
+      <rect width="300" height="400" fill="url(#pglow)"/>
+      <rect width="300" height="400" fill="url(#rglow)"/>
+      <path d="M22,12 L22,200 L185,200 L185,12 Z" fill="url(#dark-ar)" opacity="0.8"/>
+      <path d="M108,12 L278,172 L278,214 L68,12 Z"   fill="#1840dc" opacity="0.92"/>
+      <path d="M278,172 L278,214 L90,400 L52,400 Z"   fill="#1535cc" opacity="0.88"/>
+      <line x1="108" y1="12"  x2="278" y2="172" stroke="#00e8cc" stroke-width="2.5" opacity="0.95"/>
+      <line x1="68"  y1="12"  x2="278" y2="214" stroke="#00e8cc" stroke-width="2.5" opacity="0.95"/>
+      <line x1="278" y1="172" x2="90"  y2="400" stroke="#00d8be" stroke-width="2"   opacity="0.75"/>
+      <line x1="278" y1="214" x2="52"  y2="400" stroke="#00d8be" stroke-width="2"   opacity="0.75"/>
+      <path d="M168,12 L278,118 L278,152 L138,12 Z"   fill="#1e4cf0" opacity="0.7"/>
+      <path d="M278,118 L278,152 L162,330 L134,330 Z"  fill="#1840e4" opacity="0.65"/>
+      <line x1="168" y1="12"  x2="278" y2="118" stroke="#00d4be" stroke-width="2"   opacity="0.85"/>
+      <line x1="138" y1="12"  x2="278" y2="152" stroke="#00d4be" stroke-width="2"   opacity="0.85"/>
+      <line x1="278" y1="118" x2="162" y2="330" stroke="#00c4b0" stroke-width="1.5" opacity="0.6"/>
+      <line x1="278" y1="152" x2="134" y2="330" stroke="#00c4b0" stroke-width="1.5" opacity="0.6"/>
+      <path d="M222,12 L278,66 L278,87 L200,12 Z"     fill="#2258f8" opacity="0.5"/>
+      <path d="M278,66 L278,87 L204,278 L183,278 Z"    fill="#1e52f0" opacity="0.45"/>
+      <line x1="222" y1="12" x2="278" y2="66"  stroke="#00c8b8" stroke-width="1.5" opacity="0.7"/>
+      <line x1="200" y1="12" x2="278" y2="87"  stroke="#00c8b8" stroke-width="1.5" opacity="0.7"/>
+      <path d="M255,12 L278,34 L278,12 Z"             fill="url(#racc)"/>
+      <path d="M22,308 L22,382 L72,400 Z"              fill="url(#racc)" opacity="0.6"/>
+      <path d="M278,292 L210,400 L248,400 Z"           fill="url(#racc)" opacity="0.65"/>
+      <path d="M22,258 L82,400 L60,400 L22,280 Z"      fill="#cc0028" opacity="0.28"/>
+      <line x1="255" y1="12" x2="278" y2="34" stroke="#ff1840" stroke-width="2" opacity="0.8"/>
+      <rect x="22" y="268" width="256" height="1.5" fill="url(#div-b)" rx="1"/>
+    </g>
+    <path d="M22,28 Q22,12 38,12 L138,12 L150,0 L162,12 L262,12 Q278,12 278,28 L278,318 Q278,360 250,378 L150,400 L50,378 Q22,360 22,318 Z" fill="none" stroke="url(#brd-bl)" stroke-width="3"/>
+    <path d="M26,29 Q26,16 39,16 L139,16 L150,5 L161,16 L261,16 Q274,16 274,29 L274,317 Q274,357 247,374 L150,396 L53,374 Q26,357 26,317 Z" fill="none" stroke="#3070d8" stroke-width="1" opacity="0.45"/>
+    <circle cx="150" cy="47" r="36" fill="url(#lrp)"/>
+    <circle cx="150" cy="47" r="32" fill="#040c28"/>
+    <image href="data:image/jpeg;base64,{LOGO_B64}" x="117" y="14" width="66" height="66" clip-path="url(#logo-circle-potm)" preserveAspectRatio="xMidYMid slice"/>
+    <circle cx="150" cy="47" r="36" fill="none" stroke="url(#lrp)" stroke-width="1.5"/>
+    <g clip-path="url(#potm-clip)">
+      <text x="36" y="152" font-family="Arial Black,sans-serif" font-weight="900" font-size="46" fill="white">{score}</text>
+      <text x="48" y="174" font-family="Arial,sans-serif" font-weight="700" font-size="14" fill="white" opacity="0.75" letter-spacing="1">{role_display}</text>
+      <text x="150" y="298" font-family="Arial Black,sans-serif" font-weight="900" font-size="15" fill="white" text-anchor="middle" letter-spacing="2">{last} {first}</text>
+      <text x="150" y="316" font-family="Arial,sans-serif" font-weight="700" font-size="10" fill="#00d8ff" text-anchor="middle" letter-spacing="3">POTM · {month_label}</text>
+      <text x="52"  y="338" font-size="9" fill="white" font-family="Arial" font-weight="700" text-anchor="middle" opacity="0.7">VEL</text>
+      <text x="94"  y="338" font-size="9" fill="white" font-family="Arial" font-weight="700" text-anchor="middle" opacity="0.7">TIR</text>
+      <text x="136" y="338" font-size="9" fill="white" font-family="Arial" font-weight="700" text-anchor="middle" opacity="0.7">PAS</text>
+      <text x="178" y="338" font-size="9" fill="white" font-family="Arial" font-weight="700" text-anchor="middle" opacity="0.7">DRI</text>
+      <text x="220" y="338" font-size="9" fill="white" font-family="Arial" font-weight="700" text-anchor="middle" opacity="0.7">DIF</text>
+      <text x="258" y="338" font-size="9" fill="white" font-family="Arial" font-weight="700" text-anchor="middle" opacity="0.7">FIS</text>
+      <text x="52"  y="358" font-size="18" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{vel}</text>
+      <text x="94"  y="358" font-size="18" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{tir}</text>
+      <text x="136" y="358" font-size="18" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{pas}</text>
+      <text x="178" y="358" font-size="18" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{dri}</text>
+      <text x="220" y="358" font-size="18" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{dif}</text>
+      <text x="258" y="358" font-size="18" fill="white" font-family="Arial Black,sans-serif" font-weight="900" text-anchor="middle">{fis}</text>
+    </g>
+    </svg>
+    </div>"""
 
 
 def login_required(kind=None):
@@ -803,235 +881,8 @@ button:active,.btn:active{transform:translateY(0)}
 }
 
 
-/* ══════════════════════════════════════════════
-   FIGURINA SETTIMANA — FUT Style: NERA + ORO
-══════════════════════════════════════════════ */
-.award-card-week{
-  background:linear-gradient(175deg,#0b0b0b 0%,#1a1400 35%,#0d0d0d 65%,#110e00 100%);
-  border:2px solid #8a6a00;
-  border-radius:18px;
-  padding:0;
-  margin-bottom:14px;
-  box-shadow:
-    0 0 0 1px #2a2000,
-    0 0 30px rgba(212,168,0,.25),
-    0 16px 40px rgba(0,0,0,.85);
-  position:relative;overflow:hidden;text-align:center;
-  max-width:320px;margin-left:auto;margin-right:auto;
-}
-/* Cornice FUT: doppio bordo oro */
-.award-card-week::before{
-  content:'';position:absolute;inset:3px;
-  border:1px solid rgba(212,168,0,.25);
-  border-radius:15px;pointer-events:none;z-index:1;
-}
-/* Bagliore dorato in cima */
-.award-card-week::after{
-  content:'';position:absolute;
-  top:-40px;left:50%;transform:translateX(-50%);
-  width:180px;height:180px;
-  background:radial-gradient(circle,rgba(212,168,0,.18) 0%,transparent 70%);
-  pointer-events:none;z-index:0;
-}
-.award-card-week .fut-header{
-  background:linear-gradient(180deg,#1a1400 0%,#0f0f0f 100%);
-  padding:14px 18px 10px;
-  position:relative;z-index:2;
-  border-bottom:1px solid rgba(212,168,0,.2);
-}
-.award-card-week .fut-type{
-  font-size:9px;font-weight:900;letter-spacing:2.5px;text-transform:uppercase;
-  color:#8a6a00;margin-bottom:4px;
-}
-.award-card-week .fut-badge{
-  display:inline-flex;align-items:center;gap:6px;
-  background:linear-gradient(135deg,#8a6a00,#d4a800,#f0c820,#d4a800,#8a6a00);
-  color:#0b0b0b;font-weight:900;font-size:12px;
-  padding:5px 16px;border-radius:30px;letter-spacing:.6px;
-  box-shadow:0 2px 12px rgba(212,168,0,.4);
-}
-.award-card-week .fut-body{
-  padding:20px 18px 16px;position:relative;z-index:2;
-}
-.award-card-week .lightning{
-  position:absolute;top:50px;font-size:20px;opacity:.6;
-  filter:drop-shadow(0 0 6px #d4a800);z-index:3;
-}
-.award-card-week .lightning.left{left:10px;transform:rotate(-20deg)}
-.award-card-week .lightning.right{right:10px;transform:rotate(20deg)}
-/* Foto con cornice esagonale via clip-path */
-.award-card-week .fut-photo-wrap{
-  position:relative;display:inline-block;margin-bottom:12px;
-}
-.award-card-week .fut-photo-ring{
-  width:124px;height:124px;border-radius:50%;
-  background:linear-gradient(135deg,#8a6a00,#f0c820,#8a6a00);
-  padding:3px;display:inline-block;
-  box-shadow:0 0 20px rgba(212,168,0,.5);
-}
-.award-card-week .card-photo-award{
-  width:118px;height:118px;object-fit:cover;border-radius:50%;
-  display:block;background:#1a1400;
-}
-.award-card-week .card-placeholder-award{
-  width:118px;height:118px;border-radius:50%;
-  display:flex;align-items:center;justify-content:center;
-  font-size:52px;background:#1a1400;
-}
-/* Stelle rating */
-.award-card-week .fut-stars{
-  color:#d4a800;font-size:13px;letter-spacing:2px;margin-bottom:6px;
-}
-.award-card-week .award-score{
-  font-size:52px;font-weight:900;line-height:1;
-  color:#f0c820;
-  text-shadow:0 0 20px rgba(240,192,32,.6),0 2px 0 rgba(0,0,0,.8);
-  letter-spacing:-1px;
-}
-.award-card-week .fut-score-label{
-  font-size:10px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;
-  color:#8a6a00;margin-top:4px;
-}
-/* Divider oro */
-.award-card-week .fut-divider{
-  height:1px;background:linear-gradient(90deg,transparent,#8a6a00,#d4a800,#8a6a00,transparent);
-  margin:12px 0;
-}
-.award-card-week .award-name{
-  font-size:18px;font-weight:900;color:#f0c820;
-  text-transform:uppercase;letter-spacing:1.5px;
-  text-shadow:0 0 10px rgba(240,192,32,.3);
-}
-.award-card-week .fut-role-pill{
-  display:inline-block;margin-top:6px;
-  background:linear-gradient(135deg,#8a6a00,#d4a800);
-  color:#0b0b0b;font-weight:900;font-size:11px;
-  padding:3px 12px;border-radius:20px;letter-spacing:.8px;text-transform:uppercase;
-}
-.award-card-week .award-meta{
-  font-size:11px;color:#5a5030;margin-top:8px;letter-spacing:.3px;
-}
-/* Mini stats FUT */
-.award-card-week .fut-stats{
-  display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:10px;
-}
-.award-card-week .fut-stat{
-  background:rgba(212,168,0,.06);border:1px solid rgba(212,168,0,.12);
-  border-radius:8px;padding:6px 4px;
-}
-.award-card-week .fut-stat-val{font-size:15px;font-weight:900;color:#d4a800;}
-.award-card-week .fut-stat-lbl{font-size:9px;font-weight:800;color:#5a5030;text-transform:uppercase;letter-spacing:.5px;}
-
-/* ══════════════════════════════════════════════
-   FIGURINA MESE — FUT Style: ROSSO + BLU
-══════════════════════════════════════════════ */
-.award-card-month{
-  background:linear-gradient(175deg,#0d0008 0%,#1a0016 35%,#00061a 65%,#0a0014 100%);
-  border:2px solid #6a1a6a;
-  border-radius:18px;
-  padding:0;
-  margin-bottom:14px;
-  box-shadow:
-    0 0 0 1px #1a0030,
-    0 0 30px rgba(180,0,80,.2),
-    0 0 30px rgba(0,60,200,.15),
-    0 16px 40px rgba(0,0,0,.85);
-  position:relative;overflow:hidden;text-align:center;
-  max-width:320px;margin-left:auto;margin-right:auto;
-}
-.award-card-month::before{
-  content:'';position:absolute;inset:3px;
-  border:1px solid rgba(200,50,200,.15);
-  border-radius:15px;pointer-events:none;z-index:1;
-}
-.award-card-month::after{
-  content:'';position:absolute;
-  top:-40px;left:50%;transform:translateX(-50%);
-  width:200px;height:200px;
-  background:radial-gradient(circle,rgba(180,0,100,.15) 0%,rgba(0,50,180,.1) 50%,transparent 70%);
-  pointer-events:none;z-index:0;
-}
-.award-card-month .fut-header{
-  background:linear-gradient(180deg,#1a0016 0%,#0a000f 100%);
-  padding:14px 18px 10px;
-  position:relative;z-index:2;
-  border-bottom:1px solid rgba(180,0,100,.2);
-}
-.award-card-month .fut-type{
-  font-size:9px;font-weight:900;letter-spacing:2.5px;text-transform:uppercase;
-  color:#8a2080;margin-bottom:4px;
-}
-.award-card-month .fut-badge{
-  display:inline-flex;align-items:center;gap:6px;
-  background:linear-gradient(135deg,#8b0030,#cc0050,#ff2060,#1a50cc,#0030aa);
-  color:#fff;font-weight:900;font-size:12px;
-  padding:5px 16px;border-radius:30px;letter-spacing:.6px;
-  box-shadow:0 2px 12px rgba(180,0,80,.4);
-}
-.award-card-month .fut-body{
-  padding:20px 18px 16px;position:relative;z-index:2;
-}
-.award-card-month .fut-photo-ring{
-  width:124px;height:124px;border-radius:50%;
-  background:linear-gradient(135deg,#8b0030,#cc0050,#1a50cc,#0030aa);
-  padding:3px;display:inline-block;
-  box-shadow:0 0 20px rgba(180,0,80,.4),0 0 20px rgba(0,50,180,.3);
-}
-.award-card-month .card-photo-award{
-  width:118px;height:118px;object-fit:cover;border-radius:50%;
-  display:block;background:#1a0016;
-}
-.award-card-month .card-placeholder-award{
-  width:118px;height:118px;border-radius:50%;
-  display:flex;align-items:center;justify-content:center;
-  font-size:52px;background:#1a0016;
-}
-.award-card-month .fut-stars{
-  font-size:13px;letter-spacing:2px;margin-bottom:6px;
-  background:linear-gradient(90deg,#ff2060,#6060ff);
-  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
-}
-.award-card-month .award-score{
-  font-size:52px;font-weight:900;line-height:1;letter-spacing:-1px;
-  background:linear-gradient(135deg,#ff4080,#6080ff);
-  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
-  filter:drop-shadow(0 0 10px rgba(180,0,80,.4));
-}
-.award-card-month .fut-score-label{
-  font-size:10px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;
-  color:#6a1a6a;margin-top:4px;
-}
-.award-card-month .fut-divider{
-  height:1px;background:linear-gradient(90deg,transparent,#8b0030,#cc0050,#1a50cc,transparent);
-  margin:12px 0;
-}
-.award-card-month .award-name{
-  font-size:18px;font-weight:900;text-transform:uppercase;letter-spacing:1.5px;
-  background:linear-gradient(135deg,#ff6090,#8090ff);
-  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
-}
-.award-card-month .fut-role-pill{
-  display:inline-block;margin-top:6px;
-  background:linear-gradient(135deg,#8b0030,#1a50cc);
-  color:#fff;font-weight:900;font-size:11px;
-  padding:3px 12px;border-radius:20px;letter-spacing:.8px;text-transform:uppercase;
-}
-.award-card-month .award-meta{
-  font-size:11px;color:#4a1a4a;margin-top:8px;letter-spacing:.3px;
-}
-.award-card-month .fut-stats{
-  display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:10px;
-}
-.award-card-month .fut-stat{
-  background:rgba(180,0,80,.06);border:1px solid rgba(180,0,80,.12);
-  border-radius:8px;padding:6px 4px;
-}
-.award-card-month .fut-stat-val{
-  font-size:15px;font-weight:900;
-  background:linear-gradient(135deg,#ff4080,#6080ff);
-  -webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;
-}
-.award-card-month .fut-stat-lbl{font-size:9px;font-weight:800;color:#4a1a4a;text-transform:uppercase;letter-spacing:.5px;}
+.award-card-wrap{display:flex;flex-direction:column;align-items:center;margin:0 auto 18px;max-width:300px;}
+.award-card-wrap svg{width:100%;max-width:280px;height:auto;}
 </style>
 """
 

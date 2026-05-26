@@ -456,7 +456,7 @@ def _render_week_card(p):
 
     match_info = f"{ui_date(p['match_date'])} · {p['opponent']}"
     score = p['media_voto']
-    # Stelle: 1 per ogni punto sopra il 5, max 5
+    logo_b64_local = LOGO_B64
     try:
         stars = min(5, max(1, round((float(score) - 4) / 1.2)))
     except Exception:
@@ -502,7 +502,7 @@ def _render_week_card(p):
     <path d="M24,33 Q24,18 39,18 L131,18 L150,7 L169,18 L261,18 Q276,18 276,33 L276,355 Q276,370 262,370 L197,370 L150,388 L103,370 L38,370 Q24,370 24,355 Z" fill="none" stroke="#c9a030" stroke-width="0.8" opacity="0.3"/>
     <circle cx="150" cy="49" r="37" fill="url(#lrm)"/>
     <circle cx="150" cy="49" r="33" fill="#0a0906"/>
-    <image href="data:image/jpeg;base64,{LOGO_B64}" x="117" y="16" width="66" height="66" clip-path="url(#logo-circle-motw)" preserveAspectRatio="xMidYMid slice"/>
+    <image href="data:image/jpeg;base64,{logo_b64_local}" x="117" y="16" width="66" height="66" clip-path="url(#logo-circle-motw)" preserveAspectRatio="xMidYMid slice"/>
     <circle cx="150" cy="49" r="37" fill="none" stroke="url(#lrm)" stroke-width="1.5"/>
     <g clip-path="url(#motw-clip)">
       <text x="36" y="148" font-family="Arial Black,sans-serif" font-weight="900" font-size="46" fill="white">{score}</text>
@@ -530,6 +530,14 @@ def _render_month_card(p):
 
     month_label = p.get("month_label", "")
     score = p['media_voto']
+    logo_b64_local = LOGO_B64
+    # Statistiche aggregate del mese (se disponibili nel dict)
+    vel = p.get('vel', '—')
+    tir = p.get('tir', '—')
+    pas = p.get('pas', '—')
+    dri = p.get('dri', '—')
+    dif = p.get('dif', '—')
+    fis = p.get('fis', '—')
     try:
         stars = min(5, max(1, round((float(score) - 4) / 1.2)))
     except Exception:
@@ -582,7 +590,7 @@ def _render_month_card(p):
     <path d="M26,29 Q26,16 39,16 L139,16 L150,5 L161,16 L261,16 Q274,16 274,29 L274,317 Q274,357 247,374 L150,396 L53,374 Q26,357 26,317 Z" fill="none" stroke="#3070d8" stroke-width="1" opacity="0.45"/>
     <circle cx="150" cy="47" r="36" fill="url(#lrp)"/>
     <circle cx="150" cy="47" r="32" fill="#040c28"/>
-    <image href="data:image/jpeg;base64,{LOGO_B64}" x="117" y="14" width="66" height="66" clip-path="url(#logo-circle-potm)" preserveAspectRatio="xMidYMid slice"/>
+    <image href="data:image/jpeg;base64,{logo_b64_local}" x="117" y="14" width="66" height="66" clip-path="url(#logo-circle-potm)" preserveAspectRatio="xMidYMid slice"/>
     <circle cx="150" cy="47" r="36" fill="none" stroke="url(#lrp)" stroke-width="1.5"/>
     <g clip-path="url(#potm-clip)">
       <text x="36" y="152" font-family="Arial Black,sans-serif" font-weight="900" font-size="46" fill="white">{score}</text>

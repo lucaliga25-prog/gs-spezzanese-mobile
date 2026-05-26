@@ -670,7 +670,7 @@ def _render_month_card(p):
       <text x="36" y="152" font-family="Arial Black,sans-serif" font-weight="900" font-size="46" fill="white">{score}</text>
       <text x="48" y="174" font-family="Arial,sans-serif" font-weight="700" font-size="14" fill="white" opacity="0.75" letter-spacing="1">{role_display}</text>
       <text x="150" y="298" font-family="Arial Black,sans-serif" font-weight="900" font-size="15" fill="white" text-anchor="middle" letter-spacing="2">{last} {first}</text>
-      <text x="150" y="316" font-family="Arial,sans-serif" font-weight="700" font-size="10" fill="#00d8ff" text-anchor="middle" letter-spacing="3">POTM · {month_label}</text>
+      <text x="150" y="316" font-family="Arial,sans-serif" font-weight="700" font-size="10" fill="#00d8ff" text-anchor="middle" letter-spacing="3">Player of the month · {month_label}</text>
       <line x1="30" y1="328" x2="270" y2="328" stroke="#00d8ff" stroke-width="0.6" opacity="0.4"/>
       <text x="60"  y="340" font-size="9" fill="#00d8ff" font-family="Arial" font-weight="600" text-anchor="middle" opacity="0.85">PRES</text>
       <text x="120" y="340" font-size="9" fill="#00d8ff" font-family="Arial" font-weight="600" text-anchor="middle" opacity="0.85">MIN</text>

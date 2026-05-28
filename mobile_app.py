@@ -1904,10 +1904,20 @@ def coach_formation():
     matches = db_query("SELECT id,match_date,opponent,competition,home_away,result FROM matches ORDER BY match_date DESC,id DESC LIMIT 30", fetch=True)
     players = get_players()
     selected_match_id = request.values.get("match_id") or (str(matches[0]["id"]) if matches else None)
+
+    # form_override: se non None, contiene i dati del POST da mostrare al posto
+    # di quelli salvati nel DB (usato quando la validazione fallisce).
+    form_override = None
+
     if request.method == "POST":
         match_id = int(request.form.get("match_id"))
+        selected_match_id = str(match_id)
         result = request.form.get("result", "").strip()
         appearance_rows = []
+        # Costruiamo anche un dict compatibile con il formato "existing" usato
+        # nel rendering, così possiamo ripassarlo invariato in caso di errore.
+        form_existing = {}
+
         for player in players:
             pid = player["id"]
             starter = 1 if request.form.get(f"starter_{pid}") else 0
@@ -1926,14 +1936,35 @@ def coach_formation():
                 assists = int(request.form.get(f"assists_{pid}") or 0)
             except ValueError:
                 flash("Controlla minuti, gol e assist: devono essere numeri interi.")
-                return redirect(url_for("coach_formation", match_id=match_id))
+                form_override = (form_existing, result)
+                # Ricadiamo nel rendering con i dati del form
+                selected_match_id = str(match_id)
+                # Interrompiamo il for e andiamo alla resa
+                break
 
             yellow = 1 if request.form.get(f"yellow_{pid}") else 0
             red = 1 if request.form.get(f"red_{pid}") else 0
 
+            # Registriamo nel dict di ripristino tutti i valori (anche i non-convocati,
+            # con player_id=None esclusi automaticamente dopo).
+            form_existing[pid] = {
+                "player_id": pid,
+                "starter": starter,
+                "subentrato": substitute,
+                "minutes": minutes,
+                "goals": goals,
+                "assists": assists,
+                "yellow_cards": yellow,
+                "red_cards": red,
+                "captain": captain,
+                "vice_captain": vice_captain,
+                "_play": bool(request.form.get(f"play_{pid}")),
+            }
+
             if min(minutes, goals, assists) < 0:
                 flash("Minuti, gol e assist non possono essere negativi.")
-                return redirect(url_for("coach_formation", match_id=match_id))
+                form_override = (form_existing, result)
+                break
 
             # Prima venivano salvati solo i giocatori con la spunta "Convocato".
             # Da mobile può capitare di compilare minuti/gol/assist/cartellini senza
@@ -1957,81 +1988,78 @@ def coach_formation():
 
             appearance_rows.append((match_id, pid, starter, substitute, minutes, goals, assists, yellow, red, captain, vice_captain))
 
-        captains      = [row[1] for row in appearance_rows if row[9]]
-        vice_captains = [row[1] for row in appearance_rows if row[10]]
+        if form_override is None:
+            # Nessun errore nel loop: procediamo con le validazioni aggregate
+            captains      = [row[1] for row in appearance_rows if row[9]]
+            vice_captains = [row[1] for row in appearance_rows if row[10]]
 
-        # ── Vincoli formazione ────────────────────────────────────────────
-        n_convocati  = len(appearance_rows)
-        n_titolari   = sum(1 for row in appearance_rows if row[2] == 1)   # starter
-        n_subentrati = sum(1 for row in appearance_rows if row[3] == 1)   # subentrato
+            # ── Vincoli formazione ────────────────────────────────────────────
+            n_convocati  = len(appearance_rows)
+            n_titolari   = sum(1 for row in appearance_rows if row[2] == 1)   # starter
+            n_subentrati = sum(1 for row in appearance_rows if row[3] == 1)   # subentrato
 
-        if n_convocati > 20:
-            flash(f"I convocati sono {n_convocati}: il massimo consentito è 20.")
-            return redirect(url_for("coach_formation", match_id=match_id))
+            error_msg = None
+            if n_convocati > 20:
+                error_msg = f"I convocati sono {n_convocati}: il massimo consentito è 20."
+            elif n_titolari > 11:
+                error_msg = f"I titolari sono {n_titolari}: il massimo consentito è 11."
+            else:
+                titolari_senza_minuti = [row for row in appearance_rows if row[2] == 1 and row[4] < 1]
+                if titolari_senza_minuti:
+                    error_msg = (f"{len(titolari_senza_minuti)} titolar{'e' if len(titolari_senza_minuti)==1 else 'i'} "
+                                 f"{'ha' if len(titolari_senza_minuti)==1 else 'hanno'} 0 minuti: "
+                                 f"ogni titolare deve avere almeno 1 minuto.")
+            if error_msg is None and n_subentrati > 5:
+                error_msg = f"I subentrati sono {n_subentrati}: il massimo consentito è 5."
+            # ─────────────────────────────────────────────────────────────────
+            if error_msg is None and len(captains) > 1:
+                error_msg = "Puoi selezionare un solo capitano C."
+            if error_msg is None and len(vice_captains) > 1:
+                error_msg = "Puoi selezionare un solo vice capitano VC."
+            if error_msg is None and captains and vice_captains and captains[0] == vice_captains[0]:
+                error_msg = "Capitano C e vice VC devono essere due giocatori diversi."
 
-        if n_titolari > 11:
-            flash(f"I titolari sono {n_titolari}: il massimo consentito è 11.")
-            return redirect(url_for("coach_formation", match_id=match_id))
+            if error_msg is None:
+                match_rows = db_query("SELECT home_away FROM matches WHERE id=?", (match_id,), fetch=True)
+                home_away = match_rows[0]["home_away"] if match_rows else "Casa"
+                expected_goals, result_error = parse_team_goals_from_result(result, home_away)
+                if result_error:
+                    error_msg = result_error
+                else:
+                    total_goals = sum(row[5] for row in appearance_rows)
+                    total_assists = sum(row[6] for row in appearance_rows)
+                    if total_goals != expected_goals:
+                        error_msg = f"La somma dei gol dei giocatori è {total_goals}, ma dal risultato i gol squadra sono {expected_goals}."
+                    elif total_assists > expected_goals:
+                        error_msg = (f"La somma degli assist è {total_assists}, ma i gol squadra sono {expected_goals}. "
+                                     f"Gli assist non possono essere più dei gol segnati.")
 
-        # Ogni titolare deve avere almeno 1 minuto
-        titolari_senza_minuti = [
-            row for row in appearance_rows if row[2] == 1 and row[4] < 1
-        ]
-        if titolari_senza_minuti:
-            flash(f"{len(titolari_senza_minuti)} titolar{'e' if len(titolari_senza_minuti)==1 else 'i'} "
-                  f"{'ha' if len(titolari_senza_minuti)==1 else 'hanno'} 0 minuti: "
-                  f"ogni titolare deve avere almeno 1 minuto.")
-            return redirect(url_for("coach_formation", match_id=match_id))
+            if error_msg:
+                flash(error_msg)
+                form_override = (form_existing, result)
+            else:
+                db_transaction(
+                    statements=[
+                        ("UPDATE matches SET result=? WHERE id=?", (result, match_id)),
+                        ("DELETE FROM appearances WHERE match_id=?", (match_id,)),
+                    ],
+                    batches=[("""
+                        INSERT INTO appearances (match_id,player_id,starter,subentrato,minutes,goals,assists,yellow_cards,red_cards,captain,vice_captain)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    """, appearance_rows)],
+                )
+                flash("Formazione salvata.")
+                return redirect(url_for("coach_formation", match_id=match_id))
 
-        if n_subentrati > 5:
-            flash(f"I subentrati sono {n_subentrati}: il massimo consentito è 5.")
-            return redirect(url_for("coach_formation", match_id=match_id))
-        # ─────────────────────────────────────────────────────────────────
-        if len(captains) > 1:
-            flash("Puoi selezionare un solo capitano C.")
-            return redirect(url_for("coach_formation", match_id=match_id))
-        if len(vice_captains) > 1:
-            flash("Puoi selezionare un solo vice capitano VC.")
-            return redirect(url_for("coach_formation", match_id=match_id))
-        if captains and vice_captains and captains[0] == vice_captains[0]:
-            flash("Capitano C e vice VC devono essere due giocatori diversi.")
-            return redirect(url_for("coach_formation", match_id=match_id))
-
-        match_rows = db_query("SELECT home_away FROM matches WHERE id=?", (match_id,), fetch=True)
-        home_away = match_rows[0]["home_away"] if match_rows else "Casa"
-        expected_goals, result_error = parse_team_goals_from_result(result, home_away)
-        if result_error:
-            flash(result_error)
-            return redirect(url_for("coach_formation", match_id=match_id))
-
-        total_goals = sum(row[5] for row in appearance_rows)
-        total_assists = sum(row[6] for row in appearance_rows)
-
-        if total_goals != expected_goals:
-            flash(f"La somma dei gol dei giocatori è {total_goals}, ma dal risultato i gol squadra sono {expected_goals}.")
-            return redirect(url_for("coach_formation", match_id=match_id))
-
-        # Gli assist non possono essere più dei gol segnati dalla squadra.
-        # Non richiediamo assist == gol perché alcuni gol possono non avere assist.
-        if total_assists > expected_goals:
-            flash(f"La somma degli assist è {total_assists}, ma i gol squadra sono {expected_goals}. Gli assist non possono essere più dei gol segnati.")
-            return redirect(url_for("coach_formation", match_id=match_id))
-
-        db_transaction(
-            statements=[
-                ("UPDATE matches SET result=? WHERE id=?", (result, match_id)),
-                ("DELETE FROM appearances WHERE match_id=?", (match_id,)),
-            ],
-            batches=[("""
-                INSERT INTO appearances (match_id,player_id,starter,subentrato,minutes,goals,assists,yellow_cards,red_cards,captain,vice_captain)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
-            """, appearance_rows)],
-        )
-        flash("Formazione salvata.")
-        return redirect(url_for("coach_formation", match_id=match_id))
+    # ── Rendering (GET oppure POST con errore) ────────────────────────────────
     existing = {}
     selected_result = ""
-    if selected_match_id:
+    if form_override is not None:
+        # Usa i dati inviati dal form, non quelli del DB
+        existing_raw, selected_result = form_override
+        # Includi anche i giocatori senza dati (per poter mostrare i checkbox vuoti)
+        existing = existing_raw
+    elif selected_match_id:
         rows = db_query("""
             SELECT m.result,
                    a.player_id, a.starter, a.subentrato, a.minutes,
@@ -2048,9 +2076,15 @@ def coach_formation():
     player_rows = ""
     for p in players:
         ex = existing.get(p["id"])
+        # Se i dati vengono dal form (form_override), il flag "Convocato" è in _play;
+        # se vengono dal DB, la presenza del record indica già che è convocato.
+        if form_override is not None:
+            play_checked = ex and ex.get("_play")
+        else:
+            play_checked = bool(ex)
         player_rows += f"""
         <div class="player-row"><div class="player-title">{player_name(p)}</div><div class="small">{' / '.join(r.strip() for r in (p['role'] or '').split('/') if r.strip()) or '-'}</div>
-        <div class="checks"><label><input type="checkbox" name="play_{p['id']}" data-player="{p['id']}" data-role="play" {'checked' if ex else ''}> Convocato</label><label><input class="exclusive-presence" type="checkbox" name="starter_{p['id']}" data-player="{p['id']}" data-role="starter" {'checked' if ex and ex['starter'] else ''}> Titolare</label><label><input class="exclusive-presence" type="checkbox" name="sub_{p['id']}" data-player="{p['id']}" data-role="sub" {'checked' if ex and int(ex.get('subentrato') or 0) else ''}> Subentrato</label><label><input type="checkbox" name="captain_{p['id']}" {'checked' if ex and ex.get('captain') else ''}> C</label><label><input type="checkbox" name="vice_captain_{p['id']}" {'checked' if ex and ex.get('vice_captain') else ''}> VC</label></div>
+        <div class="checks"><label><input type="checkbox" name="play_{p['id']}" data-player="{p['id']}" data-role="play" {'checked' if play_checked else ''}> Convocato</label><label><input class="exclusive-presence" type="checkbox" name="starter_{p['id']}" data-player="{p['id']}" data-role="starter" {'checked' if ex and ex['starter'] else ''}> Titolare</label><label><input class="exclusive-presence" type="checkbox" name="sub_{p['id']}" data-player="{p['id']}" data-role="sub" {'checked' if ex and int(ex.get('subentrato') or 0) else ''}> Subentrato</label><label><input type="checkbox" name="captain_{p['id']}" {'checked' if ex and ex.get('captain') else ''}> C</label><label><input type="checkbox" name="vice_captain_{p['id']}" {'checked' if ex and ex.get('vice_captain') else ''}> VC</label></div>
         <div class="inline"><div><label>Minuti</label><input type="number" min="0" max="130" name="minutes_{p['id']}" value="{ex['minutes'] if ex else 0}"></div><div><label>Gol</label><input type="number" min="0" name="goals_{p['id']}" value="{ex['goals'] if ex else 0}"></div></div>
         <div class="inline"><div><label>Assist</label><input type="number" min="0" name="assists_{p['id']}" value="{ex['assists'] if ex else 0}"></div><div><label>Cartellini</label><div class="checks"><label><input type="checkbox" name="yellow_{p['id']}" {'checked' if ex and ex['yellow_cards'] else ''}> Amm.</label><label><input type="checkbox" name="red_{p['id']}" {'checked' if ex and ex['red_cards'] else ''}> Esp.</label></div></div></div></div>
         """

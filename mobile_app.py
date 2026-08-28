@@ -301,6 +301,17 @@ def player_name(row):
     return f"{row['last_name']} {row['first_name']}".strip()
 
 
+TEAM_NAME = "Spezzanese"
+
+
+def match_label(opponent, home_away):
+    """Formatta il confronto partita: 'Spezzanese-Avversario' in casa, 'Avversario-Spezzanese' fuori casa."""
+    opponent = (opponent or "").strip()
+    if home_away == "Casa":
+        return f"{TEAM_NAME}-{opponent}"
+    return f"{opponent}-{TEAM_NAME}"
+
+
 def parse_team_goals_from_result(result, home_away):
     """Restituisce i gol della nostra squadra partendo dal risultato tipo 2-1."""
     clean = (result or "").replace(" ", "")
@@ -395,7 +406,7 @@ def get_best_player_last_match():
     """Giocatore con media voto più alta nell'ultima partita (CTE, 1 query)."""
     rows = db_query("""
         WITH last_m AS (
-            SELECT m.id AS match_id, m.match_date, m.opponent
+            SELECT m.id AS match_id, m.match_date, m.opponent, m.home_away
             FROM matches m
             WHERE EXISTS (
                 SELECT 1 FROM appearances a
@@ -413,6 +424,7 @@ def get_best_player_last_match():
             COALESCE(p.photo_mime,'image/jpeg') AS photo_mime,
             lm.match_date,
             lm.opponent,
+            lm.home_away,
             ROUND(AVG(v.rating)::numeric, 2) AS media_voto,
             COUNT(v.id) AS num_voti,
             COALESCE(SUM(a.goals),0)   AS stat_gol,
@@ -424,7 +436,7 @@ def get_best_player_last_match():
         JOIN players p ON p.id = v.voted_player_id
         LEFT JOIN appearances a ON a.player_id = p.id
         GROUP BY p.id, p.first_name, p.last_name, p.role,
-                 p.photo_data, p.photo_mime, lm.match_date, lm.opponent
+                 p.photo_data, p.photo_mime, lm.match_date, lm.opponent, lm.home_away
         ORDER BY media_voto DESC, num_voti DESC
         LIMIT 1
     """, fetch=True)
@@ -484,7 +496,7 @@ def _render_week_card(p):
     else:
         photo_html = "<div class='card-placeholder-award'>👤</div>"
 
-    match_info = f"{ui_date(p['match_date'])} · {p['opponent']}"
+    match_info = f"{ui_date(p['match_date'])} · {match_label(p['opponent'], p.get('home_away'))}"
     score = p['media_voto']
     logo_b64_local = LOGO_B64
     stat_presenze = p.get('stat_presenze', 0)
@@ -1379,7 +1391,7 @@ def player_history():
 
             cards += f"""
             <div class="performance-card">
-                <div class="performance-title">{ui_date(r['match_date'])} · {r['opponent']}</div>
+                <div class="performance-title">{ui_date(r['match_date'])} · {match_label(r['opponent'], r['home_away'])}</div>
                 <div class="performance-meta">{r['competition']} · {r['home_away']} · Risultato: {r['result'] or '-'} · {titolare}</div>
 
                 <div class="performance-grid">
@@ -1494,7 +1506,7 @@ def player_matches():
 
         items += f"""
         <div class="player-row">
-            <div class="player-title">{ui_date(m['match_date'])} · {m['opponent']}</div>
+            <div class="player-title">{ui_date(m['match_date'])} · {match_label(m['opponent'], m['home_away'])}</div>
             <div class="small">{m['competition']} · {m['home_away']} · Risultato: {m['result'] or '-'} · Giocatori votabili: {m['players_over_10']}</div>
             {action}
         </div>
@@ -1575,7 +1587,7 @@ def player_votes(match_id):
         <div class="card">
             <h2>Partita già votata</h2>
             <div>Hai già inserito i voti per:</div>
-            <div><b>{ui_date(match['match_date'])}</b> vs {match['opponent']}</div>
+            <div><b>{ui_date(match['match_date'])}</b> · {match_label(match['opponent'], match['home_away'])}</div>
             <div class="small">{match['competition']} · {match['home_away']} · Risultato: {match['result'] or '-'}</div>
         </div>
         <a class="btn btn-blue" href="/player/matches">Torna alle partite</a>
@@ -1669,7 +1681,7 @@ def player_votes(match_id):
     content = f"""
     <div class="card">
         <h2>Partita selezionata</h2>
-        <div><b>{ui_date(match['match_date'])}</b> vs {match['opponent']}</div>
+        <div><b>{ui_date(match['match_date'])}</b> · {match_label(match['opponent'], match['home_away'])}</div>
         <div class="small">{match['competition']} · {match['home_away']} · Risultato: {match['result'] or '-'}</div>
         <div class="small">Puoi votare solo i giocatori che hanno fatto più di 10 minuti.</div>
         {"<div class='flash'>La distinta è presente, ma nessun giocatore risulta sopra i 10 minuti: controllo minuti consigliato dal gestionale desktop.</div>" if showing_full_lineup_fallback else ""}
@@ -1889,7 +1901,7 @@ def coach_matches():
         flash("Partita inserita.")
         return redirect(url_for("coach_matches"))
     rows = db_query("SELECT id,match_date,opponent,competition,home_away,result FROM matches ORDER BY match_date DESC,id DESC LIMIT 10", fetch=True)
-    match_list = "".join(f"<div class='player-row'><b>#{m['id']} · {ui_date(m['match_date'])}</b><br>{m['opponent']}<br><span class='small'>{m['competition']} · {m['home_away']} · {m['result'] or '-'}</span></div>" for m in rows)
+    match_list = "".join(f"<div class='player-row'><b>#{m['id']} · {ui_date(m['match_date'])}</b><br>{match_label(m['opponent'], m['home_away'])}<br><span class='small'>{m['competition']} · {m['home_away']} · {m['result'] or '-'}</span></div>" for m in rows)
     today = date.today().isoformat()
     content = f"""
     <div class="card"><h2>Nuova partita</h2><form method="post"><label>Data</label><input type="date" name="match_date" value="{today}" required><label>Avversario</label><input name="opponent" required><label>Competizione</label><select name="competition"><option>Campionato</option><option>Coppa</option></select><label>Casa/Fuori</label><select name="home_away"><option>Casa</option><option>Fuori</option></select><button>Salva partita</button></form></div>
@@ -2072,7 +2084,7 @@ def coach_formation():
         if rows:
             selected_result = rows[0]["result"] or ""
             existing = {r["player_id"]: r for r in rows if r["player_id"] is not None}
-    match_options = "".join(f"<option value='{m['id']}' {'selected' if str(m['id']) == str(selected_match_id) else ''}>#{m['id']} · {ui_date(m['match_date'])} vs {m['opponent']}</option>" for m in matches)
+    match_options = "".join(f"<option value='{m['id']}' {'selected' if str(m['id']) == str(selected_match_id) else ''}>#{m['id']} · {ui_date(m['match_date'])} · {match_label(m['opponent'], m['home_away'])}</option>" for m in matches)
     player_rows = ""
     for p in players:
         ex = existing.get(p["id"])

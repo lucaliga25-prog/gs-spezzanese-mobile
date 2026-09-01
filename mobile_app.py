@@ -9,6 +9,12 @@ from functools import wraps
 
 from flask import Flask, request, redirect, url_for, session, flash, get_flashed_messages, Response
 from datetime import timedelta
+from io import BytesIO
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.units import cm
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -1711,19 +1717,8 @@ def coach_panel():
 
 
 
-@app.route("/coach/player-stats")
-@login_required("coach")
-def coach_player_stats():
-    start_date = request.args.get("start_date", "").strip()
-    end_date = request.args.get("end_date", "").strip()
-
-    today = date.today().isoformat()
-
-    # Se una data non è impostata, uso un intervallo larghissimo.
-    start_filter = start_date if start_date else "1900-01-01"
-    end_filter = end_date if end_date else "2999-12-31"
-
-    rows = db_query("""
+def get_player_stats_rows(start_filter, end_filter):
+    return db_query("""
         SELECT
             p.id,
             trim(p.last_name || ' ' || p.first_name) AS player_name,
@@ -1809,6 +1804,21 @@ def coach_player_stats():
         start_filter, end_filter,
     ), fetch=True)
 
+
+@app.route("/coach/player-stats")
+@login_required("coach")
+def coach_player_stats():
+    start_date = request.args.get("start_date", "").strip()
+    end_date = request.args.get("end_date", "").strip()
+
+    today = date.today().isoformat()
+
+    # Se una data non è impostata, uso un intervallo larghissimo.
+    start_filter = start_date if start_date else "1900-01-01"
+    end_filter = end_date if end_date else "2999-12-31"
+
+    rows = get_player_stats_rows(start_filter, end_filter)
+
     table_rows = ""
 
     for r in rows:
@@ -1850,6 +1860,7 @@ def coach_player_stats():
             </div>
             <button class="btn-blue">Filtra periodo</button>
             <a class="btn btn-dark" href="/coach/player-stats">Azzera filtro</a>
+            <a class="btn btn-green" href="/coach/player-stats/pdf?start_date={start_date}&end_date={end_date}">Scarica PDF</a>
         </form>
     </div>
 
@@ -1884,6 +1895,72 @@ def coach_player_stats():
 
     return page("Statistiche giocatori", "Area allenatore", content)
 
+
+@app.route("/coach/player-stats/pdf")
+@login_required("coach")
+def coach_player_stats_pdf():
+    start_date = request.args.get("start_date", "").strip()
+    end_date = request.args.get("end_date", "").strip()
+
+    start_filter = start_date if start_date else "1900-01-01"
+    end_filter = end_date if end_date else "2999-12-31"
+
+    rows = get_player_stats_rows(start_filter, end_filter)
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        leftMargin=1.2 * cm, rightMargin=1.2 * cm,
+        topMargin=1.2 * cm, bottomMargin=1.2 * cm,
+    )
+    styles = getSampleStyleSheet()
+
+    periodo = f"{ui_date(start_date) if start_date else 'inizio'} — {ui_date(end_date) if end_date else 'oggi'}"
+    story = [
+        Paragraph(f"{TEAM_NAME} — Statistiche giocatori", styles["Title"]),
+        Paragraph(f"Periodo: {periodo} · Stagione {TEAM_SEASON}", styles["Normal"]),
+        Spacer(1, 0.5 * cm),
+    ]
+
+    header = ["Giocatore", "Ruolo", "Pres.", "Tit.", "Sub.", "Sost.", "Min.", "Gol", "Ass.", "Amm.", "Esp.", "All.", "Media"]
+    table_data = [header]
+    for r in rows:
+        table_data.append([
+            r["player_name"], r["role"] or "-",
+            r["presenze"], r["titolare"], r["subentrato"], r["sostituito"],
+            r["minuti"], r["gol"], r["assist"], r["ammonizioni"], r["espulsioni"],
+            r["all_presenti"], r["media_voto"],
+        ])
+
+    if len(table_data) == 1:
+        table_data.append(["Nessun giocatore nel periodo selezionato."] + [""] * (len(header) - 1))
+
+    col_widths = [4.2 * cm, 2.2 * cm] + [1.6 * cm] * (len(header) - 2)
+    table = Table(table_data, colWidths=col_widths, repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a3d2f")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("ALIGN", (2, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cccccc")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f2f2")]),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(table)
+
+    doc.build(story)
+    buffer.seek(0)
+
+    filename = f"statistiche_giocatori_{start_date or 'inizio'}_{end_date or 'oggi'}.pdf"
+    return Response(
+        buffer.read(),
+        mimetype="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 @app.route("/coach/matches", methods=["GET", "POST"])

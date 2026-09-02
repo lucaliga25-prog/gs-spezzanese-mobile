@@ -269,6 +269,15 @@ def ensure_db():
             cur.execute("ALTER TABLE appearances ADD COLUMN IF NOT EXISTS red_cards INTEGER DEFAULT 0")
             cur.execute("ALTER TABLE appearances ADD COLUMN IF NOT EXISTS captain INTEGER DEFAULT 0")
             cur.execute("ALTER TABLE appearances ADD COLUMN IF NOT EXISTS vice_captain INTEGER DEFAULT 0")
+            # Sostituzioni basate su minuto di ingresso/uscita (mobile): il minuto
+            # viene salvato così com'è selezionato in combobox (tempo + minuto locale),
+            # i minuti giocati (colonna "minutes") restano calcolati automaticamente
+            # da queste informazioni + i recuperi della partita.
+            cur.execute("ALTER TABLE appearances ADD COLUMN IF NOT EXISTS sostituito INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE appearances ADD COLUMN IF NOT EXISTS event_half TEXT DEFAULT ''")
+            cur.execute("ALTER TABLE appearances ADD COLUMN IF NOT EXISTS event_minute INTEGER")
+            cur.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS extra_time_1 INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS extra_time_2 INTEGER DEFAULT 0")
             cur.execute("ALTER TABLE player_votes ALTER COLUMN rating TYPE NUMERIC(4,2) USING rating::numeric")
 
             cur.execute("CREATE INDEX IF NOT EXISTS idx_appearances_player_match ON appearances(player_id, match_id)")
@@ -418,6 +427,66 @@ def match_progressive_numbers():
             campionato_count += 1
             numbers[r["id"]] = campionato_count
     return numbers
+
+
+def subtime_options(selected=None):
+    """Genera le opzioni della combobox minuto ingresso/uscita:
+    da 1'-1T a 50'-1T (primo tempo + recupero) e da 1'-2T a 55'-2T
+    (secondo tempo + recupero). Il value è "1T-<minuto>" / "2T-<minuto>".
+    Se `selected` combacia con un value, quell'opzione viene marcata selected."""
+    def opt(value, label):
+        sel = " selected" if selected is not None and value == selected else ""
+        return f"<option value='{value}'{sel}>{label}</option>"
+    opts = [opt("", "-- seleziona --")]
+    opts.append("<optgroup label='1° Tempo'>")
+    opts += [opt(f"1T-{m}", f"{m}'-1T") for m in range(1, 51)]
+    opts.append("</optgroup><optgroup label='2° Tempo'>")
+    opts += [opt(f"2T-{m}", f"{m}'-2T") for m in range(1, 56)]
+    opts.append("</optgroup>")
+    return "".join(opts)
+
+
+def parse_subtime(raw):
+    """Converte il value della combobox ("1T-35") in (half, minute).
+    Ritorna (None, None) se vuoto o non valido."""
+    if not raw or "-" not in raw:
+        return None, None
+    half, _, minute_s = raw.partition("-")
+    if half not in ("1T", "2T"):
+        return None, None
+    try:
+        minute = int(minute_s)
+    except ValueError:
+        return None, None
+    return half, minute
+
+
+def compute_minutes_played(starter, subentrato, sostituito, half, minute, extra_time_1, extra_time_2):
+    """Calcola i minuti giocati in base alle nuove regole (minuto di
+    ingresso/uscita invece di minuti inseriti a mano):
+      - titolare NON sostituito: 90 + recupero 1T + recupero 2T
+      - titolare sostituito nel 1T: il minuto stesso (nessun recupero aggiunto)
+      - titolare sostituito nel 2T: 45 + recupero 1T + minuto (nel 2T)
+      - subentrato nel 1T: 90 - minuto + recupero 1T + recupero 2T
+      - subentrato nel 2T: 45 - minuto + recupero 2T
+    """
+    extra_time_1 = extra_time_1 or 0
+    extra_time_2 = extra_time_2 or 0
+    if starter and not sostituito:
+        return 90 + extra_time_1 + extra_time_2
+    if starter and sostituito:
+        if half == "1T":
+            return max(0, minute)
+        if half == "2T":
+            return max(0, 45 + extra_time_1 + minute)
+        return 0
+    if subentrato:
+        if half == "1T":
+            return max(0, 90 - minute + extra_time_1 + extra_time_2)
+        if half == "2T":
+            return max(0, 45 - minute + extra_time_2)
+        return 0
+    return 0
 
 
 def last_match():
@@ -932,6 +1001,9 @@ button:disabled,.btn:disabled{opacity:.5;cursor:not-allowed;box-shadow:none}
 /* ── LAYOUT HELPERS ── */
 .row{display:grid;grid-template-columns:1fr 90px;gap:10px;align-items:center}
 .inline{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.inline3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+.subtime-row{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:10px;padding:8px 12px}
+.subtime-row label{display:block;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
 .tabs{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .small-btn{display:inline-block;width:auto;margin-top:6px;padding:8px 12px;font-size:12px;border-radius:10px}
 
@@ -1841,12 +1913,12 @@ def get_player_stats_rows(start_filter, end_filter):
 
         LEFT JOIN (
             SELECT
-                s.player_out_id AS player_id,
-                COUNT(*) AS sostituito
-            FROM substitutions s
-            JOIN matches m ON m.id=s.match_id
+                a.player_id,
+                SUM(CASE WHEN COALESCE(a.sostituito,0)=1 THEN 1 ELSE 0 END) AS sostituito
+            FROM appearances a
+            JOIN matches m ON m.id=a.match_id
             WHERE m.match_date BETWEEN ? AND ?
-            GROUP BY s.player_out_id
+            GROUP BY a.player_id
         ) so ON so.player_id=p.id
 
         LEFT JOIN (
@@ -2073,12 +2145,22 @@ def coach_formation():
 
     # form_override: se non None, contiene i dati del POST da mostrare al posto
     # di quelli salvati nel DB (usato quando la validazione fallisce).
+    # Formato: (form_existing, result, extra_time_1, extra_time_2)
     form_override = None
 
     if request.method == "POST":
         match_id = int(request.form.get("match_id"))
         selected_match_id = str(match_id)
         result = request.form.get("result", "").strip()
+        try:
+            extra_time_1 = max(0, int(request.form.get("extra_time_1") or 0))
+        except ValueError:
+            extra_time_1 = 0
+        try:
+            extra_time_2 = max(0, int(request.form.get("extra_time_2") or 0))
+        except ValueError:
+            extra_time_2 = 0
+
         appearance_rows = []
         # Costruiamo anche un dict compatibile con il formato "existing" usato
         # nel rendering, così possiamo ripassarlo invariato in caso di errore.
@@ -2093,19 +2175,26 @@ def coach_formation():
             # Titolare e Subentrato non possono essere veri insieme.
             if starter and substitute:
                 substitute = 0
-            captain = 1 if request.form.get(f"captain_{pid}") else 0
-            vice_captain = 1 if request.form.get(f"vice_captain_{pid}") else 0
+
+            # "Sostituito" ha senso solo per un titolare.
+            sostituito = 1 if (starter and request.form.get(f"sostituito_{pid}")) else 0
+            event_half, event_minute = parse_subtime(request.form.get(f"subtime_{pid}", ""))
+            # Il minuto ha senso solo per titolare-sostituito o subentrato.
+            if not ((starter and sostituito) or substitute):
+                event_half, event_minute = None, None
+
+            minutes = compute_minutes_played(
+                starter, substitute, sostituito,
+                event_half, event_minute or 0,
+                extra_time_1, extra_time_2,
+            )
 
             try:
-                minutes = int(request.form.get(f"minutes_{pid}") or 0)
                 goals = int(request.form.get(f"goals_{pid}") or 0)
                 assists = int(request.form.get(f"assists_{pid}") or 0)
             except ValueError:
-                flash("Controlla minuti, gol e assist: devono essere numeri interi.")
-                form_override = (form_existing, result)
-                # Ricadiamo nel rendering con i dati del form
-                selected_match_id = str(match_id)
-                # Interrompiamo il for e andiamo alla resa
+                flash("Controlla gol e assist: devono essere numeri interi.")
+                form_override = (form_existing, result, extra_time_1, extra_time_2)
                 break
 
             yellow = 1 if request.form.get(f"yellow_{pid}") else 0
@@ -2117,23 +2206,24 @@ def coach_formation():
                 "player_id": pid,
                 "starter": starter,
                 "subentrato": substitute,
+                "sostituito": sostituito,
+                "event_half": event_half or "",
+                "event_minute": event_minute,
                 "minutes": minutes,
                 "goals": goals,
                 "assists": assists,
                 "yellow_cards": yellow,
                 "red_cards": red,
-                "captain": captain,
-                "vice_captain": vice_captain,
                 "_play": bool(request.form.get(f"play_{pid}")),
             }
 
-            if min(minutes, goals, assists) < 0:
-                flash("Minuti, gol e assist non possono essere negativi.")
-                form_override = (form_existing, result)
+            if min(goals, assists) < 0:
+                flash("Gol e assist non possono essere negativi.")
+                form_override = (form_existing, result, extra_time_1, extra_time_2)
                 break
 
             # Prima venivano salvati solo i giocatori con la spunta "Convocato".
-            # Da mobile può capitare di compilare minuti/gol/assist/cartellini senza
+            # Da mobile può capitare di compilare gol/assist/cartellini senza
             # attivare la spunta: in quel caso i dati venivano scartati e non
             # comparivano nelle statistiche giocatore. Ora il giocatore viene
             # incluso automaticamente se ha qualsiasi dato partita valorizzato.
@@ -2141,24 +2231,20 @@ def coach_formation():
                 request.form.get(f"play_{pid}"),
                 starter,
                 substitute,
-                minutes > 0,
                 goals > 0,
                 assists > 0,
                 yellow,
                 red,
-                captain,
-                vice_captain,
             ])
             if not has_match_data:
                 continue
 
-            appearance_rows.append((match_id, pid, starter, substitute, minutes, goals, assists, yellow, red, captain, vice_captain))
+            appearance_rows.append((
+                match_id, pid, starter, substitute, minutes, goals, assists, yellow, red,
+                sostituito, event_half or "", event_minute,
+            ))
 
         if form_override is None:
-            # Nessun errore nel loop: procediamo con le validazioni aggregate
-            captains      = [row[1] for row in appearance_rows if row[9]]
-            vice_captains = [row[1] for row in appearance_rows if row[10]]
-
             # ── Vincoli formazione ────────────────────────────────────────────
             n_convocati  = len(appearance_rows)
             n_titolari   = sum(1 for row in appearance_rows if row[2] == 1)   # starter
@@ -2170,20 +2256,21 @@ def coach_formation():
             elif n_titolari > 11:
                 error_msg = f"I titolari sono {n_titolari}: il massimo consentito è 11."
             else:
-                titolari_senza_minuti = [row for row in appearance_rows if row[2] == 1 and row[4] < 1]
-                if titolari_senza_minuti:
-                    error_msg = (f"{len(titolari_senza_minuti)} titolar{'e' if len(titolari_senza_minuti)==1 else 'i'} "
-                                 f"{'ha' if len(titolari_senza_minuti)==1 else 'hanno'} 0 minuti: "
-                                 f"ogni titolare deve avere almeno 1 minuto.")
+                titolari_sostituiti_senza_minuto = [
+                    row for row in appearance_rows if row[2] == 1 and row[9] == 1 and not row[10]
+                ]
+                if titolari_sostituiti_senza_minuto:
+                    n = len(titolari_sostituiti_senza_minuto)
+                    error_msg = (f"{n} titolar{'e' if n==1 else 'i'} sostituit{'o' if n==1 else 'i'} "
+                                 f"senza il minuto di uscita indicato.")
             if error_msg is None and n_subentrati > 5:
                 error_msg = f"I subentrati sono {n_subentrati}: il massimo consentito è 5."
+            if error_msg is None:
+                subentrati_senza_minuto = [row for row in appearance_rows if row[3] == 1 and not row[10]]
+                if subentrati_senza_minuto:
+                    n = len(subentrati_senza_minuto)
+                    error_msg = (f"{n} subentrat{'o' if n==1 else 'i'} senza il minuto di ingresso indicato.")
             # ─────────────────────────────────────────────────────────────────
-            if error_msg is None and len(captains) > 1:
-                error_msg = "Puoi selezionare un solo capitano C."
-            if error_msg is None and len(vice_captains) > 1:
-                error_msg = "Puoi selezionare un solo vice capitano VC."
-            if error_msg is None and captains and vice_captains and captains[0] == vice_captains[0]:
-                error_msg = "Capitano C e vice VC devono essere due giocatori diversi."
 
             if error_msg is None:
                 match_rows = db_query("SELECT home_away FROM matches WHERE id=?", (match_id,), fetch=True)
@@ -2202,16 +2289,16 @@ def coach_formation():
 
             if error_msg:
                 flash(error_msg)
-                form_override = (form_existing, result)
+                form_override = (form_existing, result, extra_time_1, extra_time_2)
             else:
                 db_transaction(
                     statements=[
-                        ("UPDATE matches SET result=? WHERE id=?", (result, match_id)),
+                        ("UPDATE matches SET result=?, extra_time_1=?, extra_time_2=? WHERE id=?", (result, extra_time_1, extra_time_2, match_id)),
                         ("DELETE FROM appearances WHERE match_id=?", (match_id,)),
                     ],
                     batches=[("""
-                        INSERT INTO appearances (match_id,player_id,starter,subentrato,minutes,goals,assists,yellow_cards,red_cards,captain,vice_captain)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                        INSERT INTO appearances (match_id,player_id,starter,subentrato,minutes,goals,assists,yellow_cards,red_cards,sostituito,event_half,event_minute)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                     """, appearance_rows)],
                 )
                 flash("Formazione salvata.")
@@ -2220,39 +2307,57 @@ def coach_formation():
     # ── Rendering (GET oppure POST con errore) ────────────────────────────────
     existing = {}
     selected_result = ""
+    selected_extra_time_1 = 0
+    selected_extra_time_2 = 0
     if form_override is not None:
         # Usa i dati inviati dal form, non quelli del DB
-        existing_raw, selected_result = form_override
+        existing_raw, selected_result, selected_extra_time_1, selected_extra_time_2 = form_override
         # Includi anche i giocatori senza dati (per poter mostrare i checkbox vuoti)
         existing = existing_raw
     elif selected_match_id:
         rows = db_query("""
-            SELECT m.result,
+            SELECT m.result, m.extra_time_1, m.extra_time_2,
                    a.player_id, a.starter, a.subentrato, a.minutes,
                    a.goals, a.assists, a.yellow_cards, a.red_cards,
-                   a.captain, a.vice_captain
+                   a.sostituito, a.event_half, a.event_minute
             FROM matches m
             LEFT JOIN appearances a ON a.match_id = m.id
             WHERE m.id=?
         """, (selected_match_id,), fetch=True)
         if rows:
             selected_result = rows[0]["result"] or ""
+            selected_extra_time_1 = rows[0]["extra_time_1"] or 0
+            selected_extra_time_2 = rows[0]["extra_time_2"] or 0
             existing = {r["player_id"]: r for r in rows if r["player_id"] is not None}
     match_options = "".join(f"<option value='{m['id']}' {'selected' if str(m['id']) == str(selected_match_id) else ''}>{m['competition'] or 'Campionato'} #{match_numbers.get(m['id'], m['id'])} · {ui_date(m['match_date'])} · {match_label(m['opponent'], m['home_away'])}</option>" for m in matches)
     player_rows = ""
     for p in players:
-        ex = existing.get(p["id"])
+        pid = p["id"]
+        ex = existing.get(pid)
         # Se i dati vengono dal form (form_override), il flag "Convocato" è in _play;
         # se vengono dal DB, la presenza del record indica già che è convocato.
         if form_override is not None:
             play_checked = ex and ex.get("_play")
         else:
             play_checked = bool(ex)
+
+        starter_checked = bool(ex and ex.get("starter"))
+        sub_checked = bool(ex and int(ex.get("subentrato") or 0))
+        sost_checked = bool(ex and int(ex.get("sostituito") or 0))
+        selected_subtime = None
+        if ex and ex.get("event_half") and ex.get("event_minute") is not None:
+            selected_subtime = f"{ex['event_half']}-{ex['event_minute']}"
+
+        # La riga "minuto" è visibile solo se serve: titolare sostituito, o subentrato.
+        subtime_visible = (starter_checked and sost_checked) or sub_checked
+        subtime_label = "Minuto ingresso" if sub_checked else "Minuto uscita"
+
         player_rows += f"""
         <div class="player-row"><div class="player-title">{player_name(p)}</div><div class="small">{' / '.join(r.strip() for r in (p['role'] or '').split('/') if r.strip()) or '-'}</div>
-        <div class="checks"><label><input type="checkbox" name="play_{p['id']}" data-player="{p['id']}" data-role="play" {'checked' if play_checked else ''}> Convocato</label><label><input class="exclusive-presence" type="checkbox" name="starter_{p['id']}" data-player="{p['id']}" data-role="starter" {'checked' if ex and ex['starter'] else ''}> Titolare</label><label><input class="exclusive-presence" type="checkbox" name="sub_{p['id']}" data-player="{p['id']}" data-role="sub" {'checked' if ex and int(ex.get('subentrato') or 0) else ''}> Subentrato</label><label><input type="checkbox" name="captain_{p['id']}" {'checked' if ex and ex.get('captain') else ''}> C</label><label><input type="checkbox" name="vice_captain_{p['id']}" {'checked' if ex and ex.get('vice_captain') else ''}> VC</label></div>
-        <div class="inline"><div><label>Minuti</label><input type="number" min="0" max="130" name="minutes_{p['id']}" value="{ex['minutes'] if ex else 0}"></div><div><label>Gol</label><input type="number" min="0" name="goals_{p['id']}" value="{ex['goals'] if ex else 0}"></div></div>
-        <div class="inline"><div><label>Assist</label><input type="number" min="0" name="assists_{p['id']}" value="{ex['assists'] if ex else 0}"></div><div><label>Cartellini</label><div class="checks"><label><input type="checkbox" name="yellow_{p['id']}" {'checked' if ex and ex['yellow_cards'] else ''}> Amm.</label><label><input type="checkbox" name="red_{p['id']}" {'checked' if ex and ex['red_cards'] else ''}> Esp.</label></div></div></div></div>
+        <div class="checks"><label><input type="checkbox" name="play_{pid}" data-player="{pid}" data-role="play" {'checked' if play_checked else ''}> Convocato</label><label><input class="role-cb" type="checkbox" name="starter_{pid}" data-player="{pid}" data-role="starter" {'checked' if starter_checked else ''}> Titolare</label><label><input class="role-cb" type="checkbox" name="sub_{pid}" data-player="{pid}" data-role="sub" {'checked' if sub_checked else ''}> Subentrato</label><label class="sost-label" id="sostwrap_{pid}" style="display:{'' if starter_checked else 'none'}"><input class="sost-cb" type="checkbox" name="sostituito_{pid}" data-player="{pid}" {'checked' if sost_checked else ''}> Sostituito</label></div>
+        <div class="subtime-row" id="subtime_{pid}" style="display:{'' if subtime_visible else 'none'};margin-top:8px;"><label id="subtimelabel_{pid}">{subtime_label}</label><select name="subtime_{pid}" data-player="{pid}">{subtime_options(selected_subtime)}</select></div>
+        <div class="inline"><div><label>Gol</label><input type="number" min="0" name="goals_{pid}" value="{ex['goals'] if ex else 0}"></div><div><label>Assist</label><input type="number" min="0" name="assists_{pid}" value="{ex['assists'] if ex else 0}"></div></div>
+        <div class="inline"><div><label>Cartellini</label><div class="checks"><label><input type="checkbox" name="yellow_{pid}" {'checked' if ex and ex['yellow_cards'] else ''}> Amm.</label><label><input type="checkbox" name="red_{pid}" {'checked' if ex and ex['red_cards'] else ''}> Esp.</label></div></div></div></div>
         """
     content = f"""
     <div class="card"><h2>Formazione partita</h2><form method="get"><label>Partita</label><select name="match_id" onchange="this.form.submit()">{match_options}</select></form></div>
@@ -2276,13 +2381,30 @@ def coach_formation():
       <div id="limit-warn" style="display:none;margin-top:10px;padding:8px 12px;border-radius:10px;background:rgba(224,53,53,.15);color:#fca5a5;font-weight:700;font-size:13px;text-align:center;"></div>
     </div>
 
-    <form method="post" id="formation-form"><input type="hidden" name="match_id" value="{selected_match_id or ''}"><div class="card"><label>Risultato</label><input name="result" placeholder="es. 2-1" value="{selected_result or ''}"></div><div class="card"><h2>Giocatori</h2>{player_rows or 'Nessun giocatore.'}<button type="submit" id="submit-btn">Salva formazione</button></div></form><a class="btn btn-blue" href="/coach">Indietro</a>
+    <form method="post" id="formation-form"><input type="hidden" name="match_id" value="{selected_match_id or ''}"><div class="card"><div class="inline3"><div><label>Risultato</label><input name="result" placeholder="es. 2-1" value="{selected_result or ''}"></div><div><label>Recupero 1°T</label><input type="number" min="0" max="15" name="extra_time_1" value="{selected_extra_time_1}"></div><div><label>Recupero 2°T</label><input type="number" min="0" max="15" name="extra_time_2" value="{selected_extra_time_2}"></div></div></div><div class="card"><h2>Giocatori</h2>{player_rows or 'Nessun giocatore.'}<button type="submit" id="submit-btn">Salva formazione</button></div></form><a class="btn btn-blue" href="/coach">Indietro</a>
     <script>
     (function() {{
       var LIMITS = {{ conv: 20, tit: 11, sub: 5 }};
 
+      function syncPlayerRow(pid) {{
+        var starter = document.querySelector('input[name="starter_' + pid + '"]');
+        var sub     = document.querySelector('input[name="sub_' + pid + '"]');
+        var sost    = document.querySelector('input[name="sostituito_' + pid + '"]');
+        var sostWrap = document.getElementById('sostwrap_' + pid);
+        var subtimeRow = document.getElementById('subtime_' + pid);
+        var subtimeLabel = document.getElementById('subtimelabel_' + pid);
+        if (!starter || !sub) return;
+
+        if (sostWrap) sostWrap.style.display = starter.checked ? '' : 'none';
+        if (!starter.checked && sost) sost.checked = false;
+
+        var showSubtime = (starter.checked && sost && sost.checked) || sub.checked;
+        if (subtimeRow) subtimeRow.style.display = showSubtime ? '' : 'none';
+        if (subtimeLabel) subtimeLabel.textContent = sub.checked ? 'Minuto ingresso' : 'Minuto uscita';
+      }}
+
       function updateCounters() {{
-        var conv = 0, tit = 0, sub = 0, titSenzaMinuti = 0;
+        var conv = 0, tit = 0, sub = 0, minutoMancante = 0;
         var warnings = [];
 
         document.querySelectorAll('input[name^="play_"]').forEach(function(cb) {{
@@ -2291,14 +2413,21 @@ def coach_formation():
         document.querySelectorAll('input[name^="starter_"]').forEach(function(cb) {{
           if (cb.checked) {{
             tit++;
-            // controlla che il campo minuti di questo titolare sia >= 1
-            var pid = cb.name.replace('starter_','');
-            var mInput = document.querySelector('input[name="minutes_' + pid + '"]');
-            if (mInput && (parseInt(mInput.value) || 0) < 1) titSenzaMinuti++;
+            var pid = cb.getAttribute('data-player');
+            var sost = document.querySelector('input[name="sostituito_' + pid + '"]');
+            if (sost && sost.checked) {{
+              var sel = document.querySelector('select[name="subtime_' + pid + '"]');
+              if (sel && !sel.value) minutoMancante++;
+            }}
           }}
         }});
         document.querySelectorAll('input[name^="sub_"]').forEach(function(cb) {{
-          if (cb.checked) sub++;
+          if (cb.checked) {{
+            sub++;
+            var pid = cb.getAttribute('data-player');
+            var sel = document.querySelector('select[name="subtime_' + pid + '"]');
+            if (sel && !sel.value) minutoMancante++;
+          }}
         }});
 
         var cConv = document.getElementById('cnt-conv');
@@ -2315,7 +2444,7 @@ def coach_formation():
         if (conv > LIMITS.conv) warnings.push('Convocati: ' + conv + '/20 (max 20)');
         if (tit  > LIMITS.tit)  warnings.push('Titolari: '  + tit  + '/11 (max 11)');
         if (sub  > LIMITS.sub)  warnings.push('Subentrati: ' + sub + '/5 (max 5)');
-        if (titSenzaMinuti > 0) warnings.push(titSenzaMinuti + ' titolar' + (titSenzaMinuti===1?'e':'i') + ' con 0 minuti (min. 1)');
+        if (minutoMancante > 0) warnings.push(minutoMancante + ' giocator' + (minutoMancante===1?'e':'i') + ' senza il minuto di ingresso/uscita indicato');
 
         var warn = document.getElementById('limit-warn');
         var btn  = document.getElementById('submit-btn');
@@ -2342,19 +2471,45 @@ def coach_formation():
         }}
       }});
 
-      // Ascolta tutti i checkbox e i campi numerici del form
-      document.getElementById('formation-form').addEventListener('change', function(e) {{
-        if (e.target.type === 'checkbox') updateCounters();
+      // Titolare e Subentrato restano mutuamente esclusivi anche lato client
+      document.querySelectorAll('.role-cb').forEach(function(cb) {{
+        cb.addEventListener('change', function() {{
+          var pid = cb.getAttribute('data-player');
+          var role = cb.getAttribute('data-role');
+          if (cb.checked) {{
+            if (role === 'starter') {{
+              var subCb = document.querySelector('input[name="sub_' + pid + '"]');
+              if (subCb) subCb.checked = false;
+            }} else if (role === 'sub') {{
+              var startCb = document.querySelector('input[name="starter_' + pid + '"]');
+              if (startCb) startCb.checked = false;
+            }}
+          }}
+          syncPlayerRow(pid);
+          updateCounters();
+        }});
       }});
-      document.getElementById('formation-form').addEventListener('input', function(e) {{
-        if (e.target.type === 'number' && e.target.name && e.target.name.startsWith('minutes_')) updateCounters();
+      document.querySelectorAll('.sost-cb').forEach(function(cb) {{
+        cb.addEventListener('change', function() {{
+          syncPlayerRow(cb.getAttribute('data-player'));
+          updateCounters();
+        }});
       }});
 
+      // Ascolta tutti i checkbox e le select del form
+      document.getElementById('formation-form').addEventListener('change', function(e) {{
+        if (e.target.type === 'checkbox' || e.target.tagName === 'SELECT') updateCounters();
+      }});
+
+      document.querySelectorAll('.role-cb[data-role="starter"]').forEach(function(cb) {{
+        syncPlayerRow(cb.getAttribute('data-player'));
+      }});
       updateCounters();
     }})();
     </script>
     """
     return page("Formazione", "Gestione formazione e dati partita", content)
+
 
 
 @app.route("/coach/training", methods=["GET", "POST"])

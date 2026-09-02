@@ -44,7 +44,7 @@ AUTHORIZED_COACH_PLAYER_ACCESS = {
 # Non compare mai nelle statistiche desktop né nella lista giocatori web.
 AUTHORIZED_PRES_ACCESS = {
     ("Luca", "Milani"),
-    ("Sandro", "Marino"),
+    ("Sandro","Marino"),
 }
 
 
@@ -304,63 +304,40 @@ def compact_training_ids():
     in teamstats.py, così i due gestionali restano sempre coerenti."""
     with psycopg2.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
-            _compact_training_ids_on(cur)
+            cur.execute("SELECT id FROM training_sessions ORDER BY id")
+            ids = [r[0] for r in cur.fetchall()]
+            if not ids:
+                return
+
+            mapping = [(new_id, old_id) for new_id, old_id in enumerate(ids, start=1)]
+
+            cur.execute("ALTER TABLE training_attendance DROP CONSTRAINT IF EXISTS training_attendance_session_id_fkey")
+
+            cur.execute("CREATE TEMP TABLE training_id_map (new_id INTEGER NOT NULL, old_id INTEGER PRIMARY KEY) ON COMMIT DROP")
+            execute_batch(cur, "INSERT INTO training_id_map (new_id, old_id) VALUES (%s, %s)", mapping)
+
+            cur.execute("UPDATE training_sessions SET id = -id")
+            cur.execute("UPDATE training_attendance SET session_id = -session_id WHERE session_id IS NOT NULL")
+
+            cur.execute("""
+                UPDATE training_sessions SET id = m.new_id
+                FROM training_id_map m WHERE training_sessions.id = -m.old_id
+            """)
+            cur.execute("""
+                UPDATE training_attendance SET session_id = m.new_id
+                FROM training_id_map m WHERE training_attendance.session_id = -m.old_id
+            """)
+
+            cur.execute("""
+                ALTER TABLE training_attendance
+                ADD CONSTRAINT training_attendance_session_id_fkey
+                FOREIGN KEY (session_id) REFERENCES training_sessions(id) ON DELETE CASCADE
+            """)
+
+            cur.execute("CREATE SEQUENCE IF NOT EXISTS training_sessions_id_seq")
+            cur.execute("SELECT setval('training_sessions_id_seq', %s, true)", (len(ids),))
+            cur.execute("ALTER TABLE training_sessions ALTER COLUMN id SET DEFAULT nextval('training_sessions_id_seq')")
         conn.commit()
-
-
-def _compact_training_ids_on(cur):
-    """Esegue la ricompattazione degli ID sul cursore/connessione passati,
-    senza aprire/committare una connessione propria — così può essere
-    incapsulata nella STESSA transazione di un DELETE."""
-    cur.execute("SELECT id FROM training_sessions ORDER BY id")
-    ids = [r[0] for r in cur.fetchall()]
-    if not ids:
-        return
-
-    mapping = [(new_id, old_id) for new_id, old_id in enumerate(ids, start=1)]
-
-    cur.execute("ALTER TABLE training_attendance DROP CONSTRAINT IF EXISTS training_attendance_session_id_fkey")
-
-    cur.execute("CREATE TEMP TABLE IF NOT EXISTS training_id_map (new_id INTEGER NOT NULL, old_id INTEGER PRIMARY KEY) ON COMMIT DROP")
-    cur.execute("TRUNCATE training_id_map")
-    execute_batch(cur, "INSERT INTO training_id_map (new_id, old_id) VALUES (%s, %s)", mapping)
-
-    cur.execute("UPDATE training_sessions SET id = -id")
-    cur.execute("UPDATE training_attendance SET session_id = -session_id WHERE session_id IS NOT NULL")
-
-    cur.execute("""
-        UPDATE training_sessions SET id = m.new_id
-        FROM training_id_map m WHERE training_sessions.id = -m.old_id
-    """)
-    cur.execute("""
-        UPDATE training_attendance SET session_id = m.new_id
-        FROM training_id_map m WHERE training_attendance.session_id = -m.old_id
-    """)
-
-    cur.execute("""
-        ALTER TABLE training_attendance
-        ADD CONSTRAINT training_attendance_session_id_fkey
-        FOREIGN KEY (session_id) REFERENCES training_sessions(id) ON DELETE CASCADE
-    """)
-
-    cur.execute("CREATE SEQUENCE IF NOT EXISTS training_sessions_id_seq")
-    cur.execute("SELECT setval('training_sessions_id_seq', %s, true)", (len(ids),))
-    cur.execute("ALTER TABLE training_sessions ALTER COLUMN id SET DEFAULT nextval('training_sessions_id_seq')")
-
-
-def delete_training_session(session_id):
-    """Elimina un allenamento e ricompatta gli ID in un'UNICA transazione:
-    se la ricompattazione fallisce per qualunque motivo, la cancellazione
-    viene annullata (rollback) invece di lasciare il database in uno stato
-    inconsistente (allenamento cancellato ma ID non rinumerati e pagina che
-    sembra non aggiornarsi)."""
-    with psycopg2.connect(DATABASE_URL) as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM training_sessions WHERE id=%s", (session_id,))
-            deleted = cur.rowcount
-            _compact_training_ids_on(cur)
-        conn.commit()
-    return deleted
 
 
 def ui_date(date_str):
@@ -417,6 +394,30 @@ def get_players():
         WHERE LOWER(TRIM(COALESCE(role, ''))) NOT IN ('mister', 'pres')
         ORDER BY last_name, first_name
     """, fetch=True)
+
+
+def match_progressive_numbers():
+    """Ritorna un dict {match_id: numero progressivo}, calcolato in ordine
+    cronologico separatamente per Campionato e Coppa: la prima partita
+    giocata è la n.1 di quella competizione. L'id reale nel database resta
+    condiviso/globale (usato per link, form e query); questo numero serve
+    solo per la visualizzazione, così l'utente non vede una numerazione
+    "continua" tra le due competizioni. Stessa logica di teamstats.py.
+    Il confronto è case/spazi-insensitive per evitare che una partita
+    salvata come "coppa" o " Coppa " finisca per errore nel conteggio
+    Campionato."""
+    rows = db_query("SELECT id, competition FROM matches ORDER BY match_date ASC, id ASC", fetch=True)
+    numbers = {}
+    campionato_count = 0
+    coppa_count = 0
+    for r in rows:
+        if (r["competition"] or "").strip().lower() == "coppa":
+            coppa_count += 1
+            numbers[r["id"]] = coppa_count
+        else:
+            campionato_count += 1
+            numbers[r["id"]] = campionato_count
+    return numbers
 
 
 def last_match():
@@ -2052,7 +2053,8 @@ def coach_matches():
         flash("Partita inserita.")
         return redirect(url_for("coach_matches"))
     rows = db_query("SELECT id,match_date,opponent,competition,home_away,result FROM matches ORDER BY match_date DESC,id DESC", fetch=True)
-    match_list = "".join(f"<div class='player-row'><b>#{m['id']} · {ui_date(m['match_date'])}</b><br>{match_label(m['opponent'], m['home_away'])}<br><span class='small'>{m['competition']} · {m['home_away']} · {m['result'] or '-'}</span></div>" for m in rows)
+    match_numbers = match_progressive_numbers()
+    match_list = "".join(f"<div class='player-row'><b>{m['competition'] or 'Campionato'} #{match_numbers.get(m['id'], m['id'])} · {ui_date(m['match_date'])}</b><br>{match_label(m['opponent'], m['home_away'])}<br><span class='small'>{m['competition']} · {m['home_away']} · {m['result'] or '-'}</span></div>" for m in rows)
     today = date.today().isoformat()
     content = f"""
     <div class="card"><h2>Nuova partita</h2><form method="post"><label>Data</label><input type="date" name="match_date" value="{today}" required><label>Avversario</label><input name="opponent" required><label>Competizione</label><select name="competition"><option>Campionato</option><option>Coppa</option></select><label>Casa/Fuori</label><select name="home_away"><option>Casa</option><option>Fuori</option></select><button>Salva partita</button></form></div>
@@ -2065,6 +2067,7 @@ def coach_matches():
 @login_required("coach")
 def coach_formation():
     matches = db_query("SELECT id,match_date,opponent,competition,home_away,result FROM matches ORDER BY match_date DESC,id DESC LIMIT 30", fetch=True)
+    match_numbers = match_progressive_numbers()
     players = get_players()
     selected_match_id = request.values.get("match_id") or (str(matches[0]["id"]) if matches else None)
 
@@ -2235,7 +2238,7 @@ def coach_formation():
         if rows:
             selected_result = rows[0]["result"] or ""
             existing = {r["player_id"]: r for r in rows if r["player_id"] is not None}
-    match_options = "".join(f"<option value='{m['id']}' {'selected' if str(m['id']) == str(selected_match_id) else ''}>#{m['id']} · {ui_date(m['match_date'])} · {match_label(m['opponent'], m['home_away'])}</option>" for m in matches)
+    match_options = "".join(f"<option value='{m['id']}' {'selected' if str(m['id']) == str(selected_match_id) else ''}>{m['competition'] or 'Campionato'} #{match_numbers.get(m['id'], m['id'])} · {ui_date(m['match_date'])} · {match_label(m['opponent'], m['home_away'])}</option>" for m in matches)
     player_rows = ""
     for p in players:
         ex = existing.get(p["id"])
@@ -2365,14 +2368,9 @@ def coach_training():
     if request.method == "POST" and request.form.get("action") == "delete_training":
         del_id = request.form.get("session_id")
         if del_id:
-            try:
-                deleted = delete_training_session(del_id)
-                if deleted:
-                    flash("Allenamento eliminato.")
-                else:
-                    flash("Allenamento non trovato (forse già eliminato).")
-            except Exception as e:
-                flash(f"Errore durante l'eliminazione: {e}")
+            db_query("DELETE FROM training_sessions WHERE id=?", (del_id,))
+            compact_training_ids()
+            flash("Allenamento eliminato.")
         return redirect(url_for("coach_training"))
     sessions = db_query("SELECT id,training_date,title FROM training_sessions ORDER BY training_date DESC,id DESC LIMIT 30", fetch=True)
     selected_session_id = request.values.get("session_id") or (str(sessions[0]["id"]) if sessions else None)

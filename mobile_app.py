@@ -295,6 +295,50 @@ def ensure_mobile_tables():
     ensure_db()
 
 
+def compact_training_ids():
+    """Ricompatta gli ID di training_sessions dopo un'eliminazione, aggiornando
+    training_attendance.session_id di conseguenza. Elimina temporaneamente il
+    vincolo FK durante la rinumerazione (altrimenti Postgres blocca l'UPDATE
+    con una ForeignKeyViolation) e lo ricrea alla fine — stessa logica usata
+    in teamstats.py, così i due gestionali restano sempre coerenti."""
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM training_sessions ORDER BY id")
+            ids = [r[0] for r in cur.fetchall()]
+            if not ids:
+                return
+
+            mapping = [(new_id, old_id) for new_id, old_id in enumerate(ids, start=1)]
+
+            cur.execute("ALTER TABLE training_attendance DROP CONSTRAINT IF EXISTS training_attendance_session_id_fkey")
+
+            cur.execute("CREATE TEMP TABLE training_id_map (new_id INTEGER NOT NULL, old_id INTEGER PRIMARY KEY) ON COMMIT DROP")
+            execute_batch(cur, "INSERT INTO training_id_map (new_id, old_id) VALUES (%s, %s)", mapping)
+
+            cur.execute("UPDATE training_sessions SET id = -id")
+            cur.execute("UPDATE training_attendance SET session_id = -session_id WHERE session_id IS NOT NULL")
+
+            cur.execute("""
+                UPDATE training_sessions SET id = m.new_id
+                FROM training_id_map m WHERE training_sessions.id = -m.old_id
+            """)
+            cur.execute("""
+                UPDATE training_attendance SET session_id = m.new_id
+                FROM training_id_map m WHERE training_attendance.session_id = -m.old_id
+            """)
+
+            cur.execute("""
+                ALTER TABLE training_attendance
+                ADD CONSTRAINT training_attendance_session_id_fkey
+                FOREIGN KEY (session_id) REFERENCES training_sessions(id) ON DELETE CASCADE
+            """)
+
+            cur.execute("CREATE SEQUENCE IF NOT EXISTS training_sessions_id_seq")
+            cur.execute("SELECT setval('training_sessions_id_seq', %s, true)", (len(ids),))
+            cur.execute("ALTER TABLE training_sessions ALTER COLUMN id SET DEFAULT nextval('training_sessions_id_seq')")
+        conn.commit()
+
+
 def ui_date(date_str):
     try:
         y, m, d = str(date_str).split("-")
@@ -853,6 +897,12 @@ button:active,.btn:active{transform:translateY(0)}
   box-shadow:0 4px 14px rgba(0,0,0,.3);
 }
 .btn-dark:hover{background-position:0%;color:var(--white)}
+.btn-red{
+  background:linear-gradient(135deg,#7a1414,#b32222,#7a1414);background-size:200% 100%;background-position:100%;
+  color:white;box-shadow:0 4px 14px rgba(179,34,34,.3);
+}
+.btn-red:hover{background-position:0%;box-shadow:0 6px 20px rgba(179,34,34,.45)}
+button:disabled,.btn:disabled{opacity:.5;cursor:not-allowed;box-shadow:none}
 
 /* ── LAYOUT HELPERS ── */
 .row{display:grid;grid-template-columns:1fr 90px;gap:10px;align-items:center}
@@ -2288,6 +2338,13 @@ def coach_training():
         db_query("INSERT INTO training_sessions (training_date,title) VALUES (?,?)", (request.form.get("training_date"), request.form.get("title", "Allenamento")))
         flash("Allenamento creato.")
         return redirect(url_for("coach_training"))
+    if request.method == "POST" and request.form.get("action") == "delete_training":
+        del_id = request.form.get("session_id")
+        if del_id:
+            db_query("DELETE FROM training_sessions WHERE id=?", (del_id,))
+            compact_training_ids()
+            flash("Allenamento eliminato.")
+        return redirect(url_for("coach_training"))
     sessions = db_query("SELECT id,training_date,title FROM training_sessions ORDER BY training_date DESC,id DESC LIMIT 30", fetch=True)
     selected_session_id = request.values.get("session_id") or (str(sessions[0]["id"]) if sessions else None)
     if request.method == "POST" and request.form.get("action") == "save_attendance":
@@ -2323,7 +2380,8 @@ def coach_training():
     today = date.today().isoformat()
     content = f"""
     <div class="card"><h2>Nuovo allenamento</h2><form method="post"><input type="hidden" name="action" value="new_training"><label>Data</label><input type="date" name="training_date" value="{today}" required><label>Titolo</label><input name="title" value="Allenamento"><button>Crea allenamento</button></form></div>
-    <div class="card"><h2>Seleziona allenamento</h2><form method="get"><select name="session_id" onchange="this.form.submit()">{session_options}</select></form></div>
+    <div class="card"><h2>Seleziona allenamento</h2><form method="get"><select name="session_id" onchange="this.form.submit()">{session_options}</select></form>
+    <form method="post" onsubmit="return confirm('Eliminare questo allenamento e tutte le presenze collegate?');"><input type="hidden" name="action" value="delete_training"><input type="hidden" name="session_id" value="{selected_session_id or ''}"><button class="btn-red" {'disabled' if not selected_session_id else ''}>Elimina allenamento</button></form></div>
     <form method="post"><input type="hidden" name="action" value="save_attendance"><input type="hidden" name="session_id" value="{selected_session_id or ''}"><div class="card"><h2>Presenze</h2>{player_rows or 'Nessun giocatore.'}<button>Salva presenze</button></div></form><a class="btn btn-blue" href="/coach">Indietro</a>
     """
     return page("Allenamenti", "Presenze e infortunati", content)

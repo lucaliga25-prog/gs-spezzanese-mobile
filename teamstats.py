@@ -262,7 +262,13 @@ def ensure_db():
 
 def compact_table_ids(table, related_updates=None):
     """Ricompone gli ID di una tabella PostgreSQL e aggiorna le tabelle collegate.
-    Usa UPDATE...FROM batch invece di un loop Python riga per riga."""
+    Usa UPDATE...FROM batch invece di un loop Python riga per riga.
+
+    related_updates: lista di tuple (related_table, related_col, on_delete) dove
+    on_delete è la clausola da riapplicare al vincolo FK ricreato (es. "CASCADE",
+    "SET NULL"). I vincoli vengono eliminati prima di rinumerare gli ID e
+    ricreati subito dopo, altrimenti Postgres blocca l'UPDATE con una
+    ForeignKeyViolation appena gli ID vengono spostati in area negativa."""
     if related_updates is None:
         related_updates = []
 
@@ -276,11 +282,21 @@ def compact_table_ids(table, related_updates=None):
 
             mapping = [(new_id, old_id) for new_id, old_id in enumerate(ids, start=1)]
 
+            # Elimina temporaneamente i vincoli FK delle tabelle collegate,
+            # altrimenti la rinumerazione degli ID viene bloccata.
+            constraint_names = {}
+            for related_table, related_col, _on_delete in related_updates:
+                constraint = f"{related_table}_{related_col}_fkey"
+                constraint_names[(related_table, related_col)] = constraint
+                cur.execute(f"ALTER TABLE {related_table} DROP CONSTRAINT IF EXISTS {constraint}")
+
             cur.execute("CREATE TEMP TABLE id_map (new_id INTEGER NOT NULL, old_id INTEGER PRIMARY KEY) ON COMMIT DROP")
             execute_batch(cur, "INSERT INTO id_map (new_id, old_id) VALUES (%s, %s)", mapping)
 
             # Sposta temporaneamente gli ID per evitare conflitti.
             cur.execute(f"UPDATE {table} SET id = -id")
+            for related_table, related_col, _on_delete in related_updates:
+                cur.execute(f"UPDATE {related_table} SET {related_col} = -{related_col} WHERE {related_col} IS NOT NULL")
 
             # Un solo UPDATE batch invece del loop Python
             cur.execute(f"""
@@ -288,12 +304,21 @@ def compact_table_ids(table, related_updates=None):
                 FROM id_map WHERE {table}.id = -id_map.old_id
             """)
 
-            for related_table, related_col in related_updates:
+            for related_table, related_col, _on_delete in related_updates:
                 cur.execute(f"""
                     UPDATE {related_table}
                     SET {related_col} = id_map.new_id
                     FROM id_map
-                    WHERE {related_table}.{related_col} = id_map.old_id
+                    WHERE {related_table}.{related_col} = -id_map.old_id
+                """)
+
+            # Ricrea i vincoli FK eliminati sopra.
+            for related_table, related_col, on_delete in related_updates:
+                constraint = constraint_names[(related_table, related_col)]
+                cur.execute(f"""
+                    ALTER TABLE {related_table}
+                    ADD CONSTRAINT {constraint}
+                    FOREIGN KEY ({related_col}) REFERENCES {table}(id) ON DELETE {on_delete}
                 """)
 
             seq = f"{table}_id_seq"
@@ -307,7 +332,7 @@ def compact_table_ids(table, related_updates=None):
 
 
 def compact_training_ids():
-    compact_table_ids("training_sessions", [("training_attendance", "session_id")])
+    compact_table_ids("training_sessions", [("training_attendance", "session_id", "CASCADE")])
 
 
 def compact_match_ids():
@@ -386,12 +411,12 @@ def compact_player_ids():
     compact_table_ids(
         "players",
         [
-            ("appearances", "player_id"),
-            ("training_attendance", "player_id"),
-            ("substitutions", "player_in_id"),
-            ("substitutions", "player_out_id"),
-            ("player_votes", "voter_player_id"),
-            ("player_votes", "voted_player_id"),
+            ("appearances", "player_id", "CASCADE"),
+            ("training_attendance", "player_id", "CASCADE"),
+            ("substitutions", "player_in_id", "SET NULL"),
+            ("substitutions", "player_out_id", "SET NULL"),
+            ("player_votes", "voter_player_id", "CASCADE"),
+            ("player_votes", "voted_player_id", "CASCADE"),
         ],
     )
 
@@ -1039,7 +1064,7 @@ class teamstats(ctk.CTk):
         except Exception:
             tree.insert("", "end", values=values)
 
-    def create_tree(self, parent, columns, headers, widths, style_name="Treeview"):
+    def create_tree(self, parent, columns, headers, widths, style_name="Treeview", height=None):
         # Lo stile è già inizializzato in _init_tree_style() — nessuna ri-configurazione necessaria
 
         tree_frame = tk.Frame(parent, bg=COLORS["surface"])
@@ -1063,9 +1088,35 @@ class teamstats(ctk.CTk):
             tree.heading(col, text=headers[col])
             tree.column(col, width=widths.get(col, 120), anchor="center", stretch=True)
 
+        if height:
+            tree.configure(height=height)
+
         # Tag per righe alternate
         tree.tag_configure("odd",  background="#1c3520", foreground=COLORS["text"])
         tree.tag_configure("even", background="#162b19", foreground=COLORS["text"])
+
+        # La pagina è dentro una CTkScrollableFrame. La rotellina deve scorrere
+        # la tabella SOLO se c'è ancora contenuto interno da vedere (altrimenti,
+        # es. tabelle corte come "Ultime partite" che mostrano già tutte le righe,
+        # deve lasciar scorrere la pagina come faceva prima).
+        def _on_tree_mousewheel(event):
+            first, last = tree.yview()
+            scrolling_down = getattr(event, "num", None) == 5 or getattr(event, "delta", 0) < 0
+            scrolling_up = getattr(event, "num", None) == 4 or getattr(event, "delta", 0) > 0
+
+            if scrolling_down and last < 1.0:
+                tree.yview_scroll(1, "units")
+                return "break"
+            if scrolling_up and first > 0.0:
+                tree.yview_scroll(-1, "units")
+                return "break"
+            # Niente da scorrere in quella direzione: non consumare l'evento,
+            # così arriva alla CTkScrollableFrame che scorre la pagina.
+            return None
+
+        tree.bind("<MouseWheel>", _on_tree_mousewheel)
+        tree.bind("<Button-4>", _on_tree_mousewheel)
+        tree.bind("<Button-5>", _on_tree_mousewheel)
 
         return tree
 
@@ -1161,12 +1212,12 @@ class teamstats(ctk.CTk):
         recent_cols = ("date", "opponent", "competition", "home_away", "result")
         recent_headers = {"date": "Data", "opponent": "Avversario", "competition": "Competizione", "home_away": "Casa/Fuori", "result": "Risultato"}
         recent_widths = {"date": 100, "opponent": 230, "competition": 140, "home_away": 100, "result": 90}
-        recent_tree = self.create_tree(recent_card, recent_cols, recent_headers, recent_widths)
+        recent_tree = self.create_tree(recent_card, recent_cols, recent_headers, recent_widths, height=6)
         recent_rows = db_query("""
             SELECT match_date, opponent, competition, home_away, COALESCE(result, '')
             FROM matches
             ORDER BY match_date DESC, id DESC
-            LIMIT 8
+            LIMIT 20
         """, fetch=True)
         for row in recent_rows:
             row = list(row)
@@ -2496,23 +2547,25 @@ class teamstats(ctk.CTk):
         campionato_card = self.card(matches_grid, row=0, column=0, sticky="nsew", padx=(0, 8), pady=0)
         coppa_card = self.card(matches_grid, row=0, column=1, sticky="nsew", padx=(8, 0), pady=0)
 
-        ctk.CTkLabel(
+        self.campionato_count_label = ctk.CTkLabel(
             campionato_card,
             text="Partite Campionato",
             text_color=COLORS["text"],
             font=ctk.CTkFont(size=16, weight="bold")
-        ).pack(anchor="w", padx=18, pady=(16, 8))
+        )
+        self.campionato_count_label.pack(anchor="w", padx=18, pady=(16, 8))
 
-        ctk.CTkLabel(
+        self.coppa_count_label = ctk.CTkLabel(
             coppa_card,
             text="Partite Coppa",
             text_color=COLORS["text"],
             font=ctk.CTkFont(size=16, weight="bold")
-        ).pack(anchor="w", padx=18, pady=(16, 8))
+        )
+        self.coppa_count_label.pack(anchor="w", padx=18, pady=(16, 8))
 
         columns = ("id", "date", "opponent", "home_away")
         headers = {
-            "id": "ID",
+            "id": "N.",
             "date": "Data",
             "opponent": "Avversario",
             "home_away": "Casa/Fuori"
@@ -3239,19 +3292,41 @@ class teamstats(ctk.CTk):
         rows = db_query("""
             SELECT id, match_date, opponent, competition, home_away
             FROM matches
-            ORDER BY match_date DESC, id DESC
+            ORDER BY match_date ASC, id ASC
         """, fetch=True)
 
+        # Numerazione progressiva indipendente per Campionato e Coppa, calcolata
+        # in ordine cronologico (la prima partita giocata è la n.1 di quella
+        # competizione), invece di usare l'id del database che è condiviso tra
+        # le due competizioni e quindi "continua" da una all'altra.
+        progressive_by_id = {}
+        campionato_count = 0
+        coppa_count = 0
         for match_id, match_date, opponent, competition, home_away in rows:
-            values = (match_id, db_to_ui_date(match_date), opponent, home_away)
-
             if competition == "Coppa":
-                tree = getattr(self, "matches_tree_coppa", None)
+                coppa_count += 1
+                progressive_by_id[match_id] = coppa_count
             else:
-                tree = getattr(self, "matches_tree_campionato", None)
+                campionato_count += 1
+                progressive_by_id[match_id] = campionato_count
 
+        # Le tabelle mostrano le partite più recenti in cima
+        for match_id, match_date, opponent, competition, home_away in reversed(rows):
+            values = (progressive_by_id[match_id], db_to_ui_date(match_date), opponent, home_away)
+            tree = getattr(self, "matches_tree_coppa" if competition == "Coppa" else "matches_tree_campionato", None)
             if tree:
-                tree.insert("", "end", values=values)
+                # L'id reale del database resta l'iid dell'elemento (usato per
+                # selezione/eliminazione), non il valore mostrato in tabella.
+                tree.insert("", "end", iid=str(match_id), values=values)
+
+        # Contatori distinti Campionato/Coppa nelle intestazioni delle due tabelle
+        campionato_label = getattr(self, "campionato_count_label", None)
+        if campionato_label:
+            campionato_label.configure(text=f"Partite Campionato ({campionato_count})")
+
+        coppa_label = getattr(self, "coppa_count_label", None)
+        if coppa_label:
+            coppa_label.configure(text=f"Partite Coppa ({coppa_count})")
 
     def on_match_select(self, event):
         tree = event.widget if event is not None else None
@@ -3262,8 +3337,9 @@ class teamstats(ctk.CTk):
         if not sel:
             return
 
-        values = tree.item(sel[0], "values")
-        self.selected_match_id = int(values[0])
+        # L'iid dell'elemento è l'id reale del database (vedi refresh_matches);
+        # il valore mostrato in tabella è invece il numero progressivo per competizione.
+        self.selected_match_id = int(sel[0])
 
     def delete_match(self):
         if not self.selected_match_id:

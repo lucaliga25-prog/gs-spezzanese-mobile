@@ -44,6 +44,7 @@ AUTHORIZED_COACH_PLAYER_ACCESS = {
 # Non compare mai nelle statistiche desktop né nella lista giocatori web.
 AUTHORIZED_PRES_ACCESS = {
     ("Luca", "Milani"),
+    ("Sandro", "Marino"),
 }
 
 
@@ -303,40 +304,63 @@ def compact_training_ids():
     in teamstats.py, così i due gestionali restano sempre coerenti."""
     with psycopg2.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM training_sessions ORDER BY id")
-            ids = [r[0] for r in cur.fetchall()]
-            if not ids:
-                return
-
-            mapping = [(new_id, old_id) for new_id, old_id in enumerate(ids, start=1)]
-
-            cur.execute("ALTER TABLE training_attendance DROP CONSTRAINT IF EXISTS training_attendance_session_id_fkey")
-
-            cur.execute("CREATE TEMP TABLE training_id_map (new_id INTEGER NOT NULL, old_id INTEGER PRIMARY KEY) ON COMMIT DROP")
-            execute_batch(cur, "INSERT INTO training_id_map (new_id, old_id) VALUES (%s, %s)", mapping)
-
-            cur.execute("UPDATE training_sessions SET id = -id")
-            cur.execute("UPDATE training_attendance SET session_id = -session_id WHERE session_id IS NOT NULL")
-
-            cur.execute("""
-                UPDATE training_sessions SET id = m.new_id
-                FROM training_id_map m WHERE training_sessions.id = -m.old_id
-            """)
-            cur.execute("""
-                UPDATE training_attendance SET session_id = m.new_id
-                FROM training_id_map m WHERE training_attendance.session_id = -m.old_id
-            """)
-
-            cur.execute("""
-                ALTER TABLE training_attendance
-                ADD CONSTRAINT training_attendance_session_id_fkey
-                FOREIGN KEY (session_id) REFERENCES training_sessions(id) ON DELETE CASCADE
-            """)
-
-            cur.execute("CREATE SEQUENCE IF NOT EXISTS training_sessions_id_seq")
-            cur.execute("SELECT setval('training_sessions_id_seq', %s, true)", (len(ids),))
-            cur.execute("ALTER TABLE training_sessions ALTER COLUMN id SET DEFAULT nextval('training_sessions_id_seq')")
+            _compact_training_ids_on(cur)
         conn.commit()
+
+
+def _compact_training_ids_on(cur):
+    """Esegue la ricompattazione degli ID sul cursore/connessione passati,
+    senza aprire/committare una connessione propria — così può essere
+    incapsulata nella STESSA transazione di un DELETE."""
+    cur.execute("SELECT id FROM training_sessions ORDER BY id")
+    ids = [r[0] for r in cur.fetchall()]
+    if not ids:
+        return
+
+    mapping = [(new_id, old_id) for new_id, old_id in enumerate(ids, start=1)]
+
+    cur.execute("ALTER TABLE training_attendance DROP CONSTRAINT IF EXISTS training_attendance_session_id_fkey")
+
+    cur.execute("CREATE TEMP TABLE IF NOT EXISTS training_id_map (new_id INTEGER NOT NULL, old_id INTEGER PRIMARY KEY) ON COMMIT DROP")
+    cur.execute("TRUNCATE training_id_map")
+    execute_batch(cur, "INSERT INTO training_id_map (new_id, old_id) VALUES (%s, %s)", mapping)
+
+    cur.execute("UPDATE training_sessions SET id = -id")
+    cur.execute("UPDATE training_attendance SET session_id = -session_id WHERE session_id IS NOT NULL")
+
+    cur.execute("""
+        UPDATE training_sessions SET id = m.new_id
+        FROM training_id_map m WHERE training_sessions.id = -m.old_id
+    """)
+    cur.execute("""
+        UPDATE training_attendance SET session_id = m.new_id
+        FROM training_id_map m WHERE training_attendance.session_id = -m.old_id
+    """)
+
+    cur.execute("""
+        ALTER TABLE training_attendance
+        ADD CONSTRAINT training_attendance_session_id_fkey
+        FOREIGN KEY (session_id) REFERENCES training_sessions(id) ON DELETE CASCADE
+    """)
+
+    cur.execute("CREATE SEQUENCE IF NOT EXISTS training_sessions_id_seq")
+    cur.execute("SELECT setval('training_sessions_id_seq', %s, true)", (len(ids),))
+    cur.execute("ALTER TABLE training_sessions ALTER COLUMN id SET DEFAULT nextval('training_sessions_id_seq')")
+
+
+def delete_training_session(session_id):
+    """Elimina un allenamento e ricompatta gli ID in un'UNICA transazione:
+    se la ricompattazione fallisce per qualunque motivo, la cancellazione
+    viene annullata (rollback) invece di lasciare il database in uno stato
+    inconsistente (allenamento cancellato ma ID non rinumerati e pagina che
+    sembra non aggiornarsi)."""
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM training_sessions WHERE id=%s", (session_id,))
+            deleted = cur.rowcount
+            _compact_training_ids_on(cur)
+        conn.commit()
+    return deleted
 
 
 def ui_date(date_str):
@@ -2341,9 +2365,14 @@ def coach_training():
     if request.method == "POST" and request.form.get("action") == "delete_training":
         del_id = request.form.get("session_id")
         if del_id:
-            db_query("DELETE FROM training_sessions WHERE id=?", (del_id,))
-            compact_training_ids()
-            flash("Allenamento eliminato.")
+            try:
+                deleted = delete_training_session(del_id)
+                if deleted:
+                    flash("Allenamento eliminato.")
+                else:
+                    flash("Allenamento non trovato (forse già eliminato).")
+            except Exception as e:
+                flash(f"Errore durante l'eliminazione: {e}")
         return redirect(url_for("coach_training"))
     sessions = db_query("SELECT id,training_date,title FROM training_sessions ORDER BY training_date DESC,id DESC LIMIT 30", fetch=True)
     selected_session_id = request.values.get("session_id") or (str(sessions[0]["id"]) if sessions else None)

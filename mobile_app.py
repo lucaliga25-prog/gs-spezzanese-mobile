@@ -1953,7 +1953,7 @@ def player_votes(match_id):
 @login_required("coach")
 def coach_panel():
     content = """
-    <div class="card"><h2>Pannello allenatore</h2><div class="tabs"><a class="btn btn-blue" href="/coach/matches">Partite</a><a class="btn btn-green" href="/coach/formation">Formazione</a><a class="btn btn-dark" href="/coach/training">Allenamenti</a><a class="btn btn-blue" href="/coach/player-stats">Statistiche giocatori</a><a class="btn" href="/logout">Esci</a></div></div>
+    <div class="card"><h2>Pannello allenatore</h2><div class="tabs"><a class="btn btn-blue" href="/coach/matches">Partite</a><a class="btn btn-green" href="/coach/formation">Formazione</a><a class="btn btn-dark" href="/coach/training">Allenamenti</a><a class="btn btn-dark" href="/coach/training-summary">Riepilogo allenamenti</a><a class="btn btn-blue" href="/coach/player-stats">Statistiche giocatori</a><a class="btn" href="/logout">Esci</a></div></div>
     """
     return page("Allenatore", "Gestione rapida da telefono", content)
 
@@ -2715,6 +2715,63 @@ def coach_training():
     </script>
     """
     return page("Allenamenti", "Presenze e infortunati", content)
+
+
+@app.route("/coach/training-summary")
+@login_required("coach")
+def coach_training_summary():
+    """Elenco di tutti gli allenamenti con, per ciascuno, il conteggio di
+    presenti/assenti/infortunati. Gli assenti sono calcolati come rosa
+    attuale meno presenti meno infortunati (stessa logica della casella
+    riepilogativa nella pagina "Allenamenti"), così i due numeri restano
+    sempre coerenti tra loro."""
+    players = get_players()
+    total_players = len(players)
+
+    sessions = db_query("""
+        SELECT ts.id, ts.training_date, ts.title,
+               SUM(CASE WHEN ta.present=1 THEN 1 ELSE 0 END) AS presenti,
+               SUM(CASE WHEN ta.present=2 THEN 1 ELSE 0 END) AS infortunati,
+               COUNT(ta.player_id) AS registrati
+        FROM training_sessions ts
+        LEFT JOIN training_attendance ta ON ta.session_id = ts.id
+        GROUP BY ts.id, ts.training_date, ts.title
+        ORDER BY ts.training_date DESC, ts.id DESC
+    """, fetch=True)
+
+    rows_html = ""
+    for s in sessions:
+        presenti = s["presenti"] or 0
+        infortunati = s["infortunati"] or 0
+        registrati = s["registrati"] or 0
+        assenti = max(0, total_players - presenti - infortunati)
+        nota = "" if registrati > 0 else " <span class='small'>(presenze non ancora registrate)</span>"
+        rows_html += f"""
+        <tr>
+            <td style="text-align:left">{ui_date(s['training_date'])} · {s['title']}{nota}</td>
+            <td>{presenti}</td>
+            <td>{assenti}</td>
+            <td>{infortunati}</td>
+        </tr>
+        """
+
+    if not rows_html:
+        rows_html = "<tr><td colspan='4'>Nessun allenamento registrato.</td></tr>"
+
+    content = f"""
+    <div class="card">
+        <h2>Riepilogo allenamenti</h2>
+        <div class="small">Presenze, assenze e infortuni per ogni allenamento (rosa attuale: {total_players} giocatori). Gli assenti non includono gli infortunati.</div>
+        <div class="table-wrap" style="margin-top:10px;">
+            <table class="stats-table">
+                <thead><tr><th>Allenamento</th><th>Presenti</th><th>Assenti</th><th>Infortunati</th></tr></thead>
+                <tbody>{rows_html}</tbody>
+            </table>
+        </div>
+    </div>
+    <a class="btn btn-blue" href="/coach">Indietro</a>
+    """
+    return page("Riepilogo allenamenti", "Presenze per allenamento", content)
 
 
 if __name__ == "__main__":

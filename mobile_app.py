@@ -44,7 +44,6 @@ AUTHORIZED_COACH_PLAYER_ACCESS = {
 # Non compare mai nelle statistiche desktop né nella lista giocatori web.
 AUTHORIZED_PRES_ACCESS = {
     ("Luca", "Milani"),
-    ("Sandro","Marino"),
 }
 
 
@@ -1340,6 +1339,7 @@ def player_home():
     # non ai mister né al presidente (non hanno presenze in distinta).
     show_history = not session.get("is_coach_player_access") and not session.get("is_pres_player_access")
     history_btn = '<a class="btn btn-dark" href="/player/history">Storico prestazioni</a>' if show_history else ""
+    stats_btn = '<a class="btn btn-dark" href="/player/stats">Le mie statistiche</a>' if show_history else ""
 
     content = pres_access_note + coach_access_note + f"""
     <div class="card">
@@ -1357,6 +1357,7 @@ def player_home():
         <a class="btn btn-blue" href="/player/matches">Scegli partita da votare</a>
         <a class="btn btn-green" href="/player/card">Visualizza la mia figurina</a>
         {history_btn}
+        {stats_btn}
         <a class="btn" style="background:linear-gradient(135deg,#b8860b,#f5c518);color:#0a0a0a;font-weight:900;" href="/awards">⚡ Figurine Premi</a>
         <a class="btn" href="/logout">Esci</a>
     </div>
@@ -1605,6 +1606,100 @@ def player_history():
     """
 
     return page("Storico prestazioni", f"Ciao {session.get('player_name')}", content)
+
+
+@app.route("/player/stats")
+@login_required("player")
+def player_stats():
+    """Versione 'personale' della pagina statistiche dell'allenatore: stessa
+    tabella riassuntiva (presenze, titolare, subentrato, sostituito, minuti,
+    gol, assist, ammonizioni, espulsioni, allenamenti, media voto), ma
+    filtrata lato SQL sul solo giocatore loggato — non vede mai dati di
+    nessun altro compagno di squadra."""
+    player_id = session["player_id"]
+
+    start_date = request.args.get("start_date", "").strip()
+    end_date = request.args.get("end_date", "").strip()
+
+    today = date.today().isoformat()
+
+    start_filter = start_date if start_date else "1900-01-01"
+    end_filter = end_date if end_date else "2999-12-31"
+
+    rows = get_player_stats_rows(start_filter, end_filter, player_id_filter=player_id)
+    r = rows[0] if rows else None
+
+    if r is None:
+        table_rows = "<tr><td colspan='12'>Nessun dato disponibile (ruolo mister/presidente non ha statistiche).</td></tr>"
+    else:
+        table_rows = f"""
+        <tr>
+            <td><b>{r['player_name']}</b><br><span class="small">{r['role'] or '-'}</span></td>
+            <td>{r['presenze']}</td>
+            <td>{r['titolare']}</td>
+            <td>{r['subentrato']}</td>
+            <td>{r['sostituito']}</td>
+            <td>{r['minuti']}</td>
+            <td>{r['gol']}</td>
+            <td>{r['assist']}</td>
+            <td>{r['ammonizioni']}</td>
+            <td>{r['espulsioni']}</td>
+            <td>{r['all_presenti']}</td>
+            <td><b>{r['media_voto']}</b></td>
+        </tr>
+        """
+
+    content = f"""
+    <div class="card">
+        <h2>Le mie statistiche</h2>
+        <div class="small">Qui vedi solo i tuoi totali nel periodo selezionato — nessun dato degli altri compagni di squadra.</div>
+
+        <form method="get">
+            <div class="inline">
+                <div>
+                    <label>Dal</label>
+                    <input type="date" name="start_date" value="{start_date}">
+                </div>
+                <div>
+                    <label>Al</label>
+                    <input type="date" name="end_date" value="{end_date or today}">
+                </div>
+            </div>
+            <button class="btn-blue">Filtra periodo</button>
+            <a class="btn btn-dark" href="/player/stats">Azzera filtro</a>
+        </form>
+    </div>
+
+    <div class="card">
+        <div class="table-wrap">
+            <table class="stats-table">
+                <thead>
+                    <tr>
+                        <th>Giocatore</th>
+                        <th>Pres</th>
+                        <th>Tit</th>
+                        <th>Sub</th>
+                        <th>Sost</th>
+                        <th>Min</th>
+                        <th>Gol</th>
+                        <th>Ast</th>
+                        <th>Amm</th>
+                        <th>Esp</th>
+                        <th>Allen.</th>
+                        <th>Voto</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {table_rows}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <a class="btn btn-blue" href="/player">Area giocatore</a>
+    """
+
+    return page("Le mie statistiche", f"Ciao {session.get('player_name')}", content)
 
 
 @app.route("/player/matches")
@@ -1864,7 +1959,7 @@ def coach_panel():
 
 
 
-def get_player_stats_rows(start_filter, end_filter):
+def get_player_stats_rows(start_filter, end_filter, player_id_filter=None):
     return db_query("""
         SELECT
             p.id,
@@ -1942,6 +2037,7 @@ def get_player_stats_rows(start_filter, end_filter):
         ) vt ON vt.player_id=p.id
 
         WHERE LOWER(TRIM(COALESCE(p.role, ''))) NOT IN ('mister', 'pres')
+          """ + ("AND p.id=?" if player_id_filter is not None else "") + """
         ORDER BY COALESCE(ms.minuti,0) DESC, p.last_name, p.first_name
     """, (
         start_filter, end_filter,
@@ -1949,7 +2045,7 @@ def get_player_stats_rows(start_filter, end_filter):
         start_filter, end_filter,
         start_filter, end_filter,
         start_filter, end_filter,
-    ), fetch=True)
+    ) + ((player_id_filter,) if player_id_filter is not None else ()), fetch=True)
 
 
 @app.route("/coach/player-stats")
@@ -2551,6 +2647,14 @@ def coach_training():
         rows = db_query("SELECT player_id,present FROM training_attendance WHERE session_id=?", (selected_session_id,), fetch=True)
         existing = {r["player_id"]: r["present"] for r in rows}
     session_options = "".join(f"<option value='{s['id']}' {'selected' if str(s['id']) == str(selected_session_id) else ''}>#{s['id']} · {ui_date(s['training_date'])} · {s['title']}</option>" for s in sessions)
+
+    # Conteggio iniziale (lato server) per la casella riepilogativa: presenti e
+    # infortunati sono le due categorie esplicite, gli assenti sono tutti gli
+    # altri (cioè il totale meno presenti e infortunati).
+    presenti_count = sum(1 for p in players if existing.get(p["id"], 0) == 1)
+    infortunati_count = sum(1 for p in players if existing.get(p["id"], 0) == 2)
+    assenti_count = len(players) - presenti_count - infortunati_count
+
     player_rows = ""
     for p in players:
         status = existing.get(p["id"], 0)
@@ -2564,7 +2668,51 @@ def coach_training():
     <div class="card"><h2>Nuovo allenamento</h2><form method="post"><input type="hidden" name="action" value="new_training"><label>Data</label><input type="date" name="training_date" value="{today}" required><label>Titolo</label><input name="title" value="Allenamento"><button>Crea allenamento</button></form></div>
     <div class="card"><h2>Seleziona allenamento</h2><form method="get"><select name="session_id" onchange="this.form.submit()">{session_options}</select></form>
     <form method="post" onsubmit="return confirm('Eliminare questo allenamento e tutte le presenze collegate?');"><input type="hidden" name="action" value="delete_training"><input type="hidden" name="session_id" value="{selected_session_id or ''}"><button class="btn-red" {'disabled' if not selected_session_id else ''}>Elimina allenamento</button></form></div>
+
+    <div class="card" id="training-counters-card" style="padding:14px 18px;">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;text-align:center;">
+        <div>
+          <div id="cnt-presenti" style="font-size:26px;font-weight:900;color:var(--green-bright)">{presenti_count}</div>
+          <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Presenti</div>
+        </div>
+        <div>
+          <div id="cnt-assenti" style="font-size:26px;font-weight:900;color:var(--red)">{assenti_count}</div>
+          <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Assenti</div>
+        </div>
+        <div>
+          <div id="cnt-infortunati" style="font-size:26px;font-weight:900;color:var(--gold-light)">{infortunati_count}</div>
+          <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Infortunati</div>
+        </div>
+      </div>
+    </div>
+
     <form method="post"><input type="hidden" name="action" value="save_attendance"><input type="hidden" name="session_id" value="{selected_session_id or ''}"><div class="card"><h2>Presenze</h2>{player_rows or 'Nessun giocatore.'}<button>Salva presenze</button></div></form><a class="btn btn-blue" href="/coach">Indietro</a>
+    <script>
+    (function() {{
+      function updateTrainingCounters() {{
+        var presenti = 0, assenti = 0, infortunati = 0;
+        var groups = {{}};
+        document.querySelectorAll('input[type="radio"][name^="status_"]').forEach(function(r) {{
+          groups[r.name] = groups[r.name] || [];
+          groups[r.name].push(r);
+        }});
+        Object.keys(groups).forEach(function(name) {{
+          var checked = groups[name].find(function(r) {{ return r.checked; }});
+          var val = checked ? checked.value : "0";
+          if (val === "1") presenti++;
+          else if (val === "2") infortunati++;
+          else assenti++;
+        }});
+        document.getElementById('cnt-presenti').textContent = presenti;
+        document.getElementById('cnt-assenti').textContent = assenti;
+        document.getElementById('cnt-infortunati').textContent = infortunati;
+      }}
+      document.querySelectorAll('input[type="radio"][name^="status_"]').forEach(function(r) {{
+        r.addEventListener('change', updateTrainingCounters);
+      }});
+      updateTrainingCounters();
+    }})();
+    </script>
     """
     return page("Allenamenti", "Presenze e infortunati", content)
 

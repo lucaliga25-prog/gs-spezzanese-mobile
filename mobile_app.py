@@ -1,13 +1,10 @@
 import os
 import base64
-import smtplib
-from email.mime.text import MIMEText
 import psycopg2
 from psycopg2.pool import SimpleConnectionPool
 from psycopg2.extras import RealDictCursor, execute_batch
 from dotenv import load_dotenv
-from datetime import date, datetime
-from zoneinfo import ZoneInfo
+from datetime import date
 from functools import wraps
 
 from flask import Flask, request, redirect, url_for, session, flash, get_flashed_messages, Response
@@ -21,16 +18,6 @@ from reportlab.lib.styles import getSampleStyleSheet
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
-ROME_TZ = ZoneInfo("Europe/Rome")
-
-# ── Configurazione invio email (impostare come variabili d'ambiente su Render) ──
-SMTP_HOST = os.getenv("SMTP_HOST", "")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
-APP_BASE_URL = os.getenv("APP_BASE_URL", "").rstrip("/")
-CRON_SECRET = os.getenv("CRON_SECRET", "")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL non trovata. Controlla il file .env.")
 
@@ -292,49 +279,6 @@ def ensure_db():
             cur.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS extra_time_2 INTEGER DEFAULT 0")
             cur.execute("ALTER TABLE player_votes ALTER COLUMN rating TYPE NUMERIC(4,2) USING rating::numeric")
 
-            # Email giocatore per i promemoria automatici.
-            cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS email TEXT DEFAULT ''")
-
-            # Questionario pre-allenamento (qualità sonno, stress, stanchezza, dolore
-            # muscolare — voto 1-9) e post-allenamento (difficoltà — voto 1-9).
-            # UNIQUE(session_id, player_id): un solo invio per giocatore per allenamento
-            # (un nuovo salvataggio sovrascrive il precedente, non lo duplica).
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS pre_training_responses (
-                    id INTEGER PRIMARY KEY,
-                    session_id INTEGER NOT NULL REFERENCES training_sessions(id) ON DELETE CASCADE,
-                    player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
-                    sonno INTEGER NOT NULL CHECK (sonno BETWEEN 1 AND 9),
-                    stress INTEGER NOT NULL CHECK (stress BETWEEN 1 AND 9),
-                    stanchezza INTEGER NOT NULL CHECK (stanchezza BETWEEN 1 AND 9),
-                    dolore INTEGER NOT NULL CHECK (dolore BETWEEN 1 AND 9),
-                    submitted_at TIMESTAMP NOT NULL DEFAULT now(),
-                    UNIQUE(session_id, player_id)
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS post_training_responses (
-                    id INTEGER PRIMARY KEY,
-                    session_id INTEGER NOT NULL REFERENCES training_sessions(id) ON DELETE CASCADE,
-                    player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
-                    difficolta INTEGER NOT NULL CHECK (difficolta BETWEEN 1 AND 9),
-                    submitted_at TIMESTAMP NOT NULL DEFAULT now(),
-                    UNIQUE(session_id, player_id)
-                )
-            """)
-            # Registro invii promemoria: evita doppi invii se il cron job Render
-            # (che gira più volte nella finestra oraria per gestire l'ora legale)
-            # scatta più di una volta nello stesso slot.
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS reminder_log (
-                    id INTEGER PRIMARY KEY,
-                    training_date TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    sent_at TIMESTAMP NOT NULL DEFAULT now(),
-                    UNIQUE(training_date, kind)
-                )
-            """)
-
             cur.execute("CREATE INDEX IF NOT EXISTS idx_appearances_player_match ON appearances(player_id, match_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_appearances_match ON appearances(match_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_matches_date ON matches(match_date)")
@@ -343,7 +287,7 @@ def ensure_db():
             cur.execute("CREATE INDEX IF NOT EXISTS idx_training_attendance_player_session ON training_attendance(player_id, session_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_training_sessions_date ON training_sessions(training_date)")
 
-            for table in ["players", "matches", "appearances", "substitutions", "training_sessions", "training_attendance", "player_votes", "pre_training_responses", "post_training_responses", "reminder_log"]:
+            for table in ["players", "matches", "appearances", "substitutions", "training_sessions", "training_attendance", "player_votes"]:
                 seq = f"{table}_id_seq"
                 cur.execute(f"CREATE SEQUENCE IF NOT EXISTS {seq}")
                 cur.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table}")
@@ -458,65 +402,6 @@ def get_players():
         WHERE LOWER(TRIM(COALESCE(role, ''))) NOT IN ('mister', 'pres')
         ORDER BY last_name, first_name
     """, fetch=True)
-
-
-def send_email(to_addr, subject, body):
-    """Invia una singola email via SMTP. Ritorna (ok, errore)."""
-    if not SMTP_HOST or not SMTP_USER or not SMTP_PASSWORD:
-        return False, "Configurazione SMTP mancante (SMTP_HOST/SMTP_USER/SMTP_PASSWORD)."
-    if not to_addr:
-        return False, "Indirizzo email mancante."
-    try:
-        msg = MIMEText(body, "plain", "utf-8")
-        msg["Subject"] = subject
-        msg["From"] = SMTP_FROM or SMTP_USER
-        msg["To"] = to_addr
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(SMTP_FROM or SMTP_USER, [to_addr], msg.as_string())
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
-
-def send_training_reminders(kind, training_date):
-    """Invia a tutti i giocatori con email registrata il promemoria per
-    l'allenamento del giorno indicato. kind: 'pre' (ore 15) o 'post' (ore 21).
-    Ritorna (inviate, fallite) come liste di nomi giocatore."""
-    players_with_email = db_query("""
-        SELECT id, first_name, last_name, email FROM players
-        WHERE LOWER(TRIM(COALESCE(role, ''))) NOT IN ('mister', 'pres')
-          AND COALESCE(email, '') != ''
-        ORDER BY last_name, first_name
-    """, fetch=True)
-
-    link_pre = f"{APP_BASE_URL}/player/pre-training" if APP_BASE_URL else "l'app GS Spezzanese"
-    link_post = f"{APP_BASE_URL}/player/post-training" if APP_BASE_URL else "l'app GS Spezzanese"
-
-    if kind == "pre":
-        subject = "Questionario pre-allenamento — GS Spezzanese"
-        body_tpl = ("Ciao {name},\n\n"
-                    "Oggi c'è allenamento. Prima di scendere in campo, rispondi al breve questionario "
-                    "su qualità del sonno, stress, stanchezza e dolore muscolare:\n\n{link}\n\n"
-                    "GS Spezzanese")
-        link = link_pre
-    else:
-        subject = "Questionario post-allenamento — GS Spezzanese"
-        body_tpl = ("Ciao {name},\n\n"
-                    "Com'è andato l'allenamento di oggi? Indica il livello di difficoltà percepita:\n\n{link}\n\n"
-                    "GS Spezzanese")
-        link = link_post
-
-    inviate, fallite = [], []
-    for p in players_with_email:
-        name = f"{p['first_name']} {p['last_name']}"
-        ok, err = send_email(p["email"], subject, body_tpl.format(name=name, link=link))
-        if ok:
-            inviate.append(name)
-        else:
-            fallite.append(f"{name} ({err})")
-    return inviate, fallite
 
 
 def match_progressive_numbers():
@@ -661,16 +546,12 @@ def _award_cached(key, fn):
 
 
 def get_best_player_last_match():
-    """Giocatore con media voto più alta nell'ultima partita GIÀ GIOCATA
-    (data antecedente a oggi — non l'ultima partita inserita, che potrebbe
-    avere data odierna/futura o essere stata compilata in anticipo)."""
-    today = date.today().isoformat()
+    """Giocatore con media voto più alta nell'ultima partita (CTE, 1 query)."""
     rows = db_query("""
         WITH last_m AS (
             SELECT m.id AS match_id, m.match_date, m.opponent, m.home_away
             FROM matches m
-            WHERE m.match_date < ?
-              AND EXISTS (
+            WHERE EXISTS (
                 SELECT 1 FROM appearances a
                 WHERE a.match_id = m.id AND COALESCE(a.minutes,0) > 10
             )
@@ -696,12 +577,12 @@ def get_best_player_last_match():
         FROM last_m lm
         JOIN player_votes v ON v.match_id = lm.match_id
         JOIN players p ON p.id = v.voted_player_id
-        LEFT JOIN appearances a ON a.player_id = p.id AND a.match_id = lm.match_id
+        LEFT JOIN appearances a ON a.player_id = p.id
         GROUP BY p.id, p.first_name, p.last_name, p.role,
                  p.photo_data, p.photo_mime, lm.match_date, lm.opponent, lm.home_away
         ORDER BY media_voto DESC, num_voti DESC
         LIMIT 1
-    """, (today,), fetch=True)
+    """, fetch=True)
     return rows[0] if rows else None
 
 
@@ -1459,8 +1340,6 @@ def player_home():
     show_history = not session.get("is_coach_player_access") and not session.get("is_pres_player_access")
     history_btn = '<a class="btn btn-dark" href="/player/history">Storico prestazioni</a>' if show_history else ""
     stats_btn = '<a class="btn btn-dark" href="/player/stats">Le mie statistiche</a>' if show_history else ""
-    pre_training_btn = '<a class="btn btn-dark" href="/player/pre-training">Questionario pre-allenamento</a>' if show_history else ""
-    post_training_btn = '<a class="btn btn-dark" href="/player/post-training">Questionario post-allenamento</a>' if show_history else ""
 
     content = pres_access_note + coach_access_note + f"""
     <div class="card">
@@ -1479,8 +1358,6 @@ def player_home():
         <a class="btn btn-green" href="/player/card">Visualizza la mia figurina</a>
         {history_btn}
         {stats_btn}
-        {pre_training_btn}
-        {post_training_btn}
         <a class="btn" style="background:linear-gradient(135deg,#b8860b,#f5c518);color:#0a0a0a;font-weight:900;" href="/awards">⚡ Figurine Premi</a>
         <a class="btn" href="/logout">Esci</a>
     </div>
@@ -1825,139 +1702,6 @@ def player_stats():
     return page("Le mie statistiche", f"Ciao {session.get('player_name')}", content)
 
 
-@app.route("/player/pre-training", methods=["GET", "POST"])
-@login_required("player")
-def player_pre_training():
-    player_id = session["player_id"]
-
-    sessions = db_query("SELECT id,training_date,title FROM training_sessions ORDER BY training_date DESC,id DESC LIMIT 30", fetch=True)
-    today_ids = [s["id"] for s in sessions if s["training_date"] == date.today().isoformat()]
-    selected_session_id = request.values.get("session_id") or (str(today_ids[0]) if today_ids else (str(sessions[0]["id"]) if sessions else None))
-
-    if request.method == "POST":
-        session_id = request.form.get("session_id")
-        try:
-            sonno = int(request.form.get("sonno"))
-            stress = int(request.form.get("stress"))
-            stanchezza = int(request.form.get("stanchezza"))
-            dolore = int(request.form.get("dolore"))
-            if not all(1 <= v <= 9 for v in (sonno, stress, stanchezza, dolore)):
-                raise ValueError
-        except (TypeError, ValueError):
-            flash("Seleziona un valore da 1 a 9 per tutte le domande.")
-            return redirect(url_for("player_pre_training", session_id=session_id))
-
-        db_query("""
-            INSERT INTO pre_training_responses (session_id, player_id, sonno, stress, stanchezza, dolore)
-            VALUES (?,?,?,?,?,?)
-            ON CONFLICT (session_id, player_id) DO UPDATE SET
-                sonno=EXCLUDED.sonno, stress=EXCLUDED.stress,
-                stanchezza=EXCLUDED.stanchezza, dolore=EXCLUDED.dolore,
-                submitted_at=now()
-        """, (session_id, player_id, sonno, stress, stanchezza, dolore))
-        flash("Risposte salvate. Grazie!")
-        return redirect(url_for("player_pre_training", session_id=session_id))
-
-    existing = None
-    if selected_session_id:
-        rows = db_query(
-            "SELECT sonno,stress,stanchezza,dolore FROM pre_training_responses WHERE session_id=? AND player_id=?",
-            (selected_session_id, player_id), fetch=True,
-        )
-        existing = rows[0] if rows else None
-
-    session_options = "".join(
-        f"<option value='{s['id']}' {'selected' if str(s['id']) == str(selected_session_id) else ''}>{ui_date(s['training_date'])} · {s['title']}</option>"
-        for s in sessions
-    )
-
-    def scale(name, current):
-        opts = "".join(f"<option value='{v}' {'selected' if current == v else ''}>{v}</option>" for v in range(1, 10))
-        return f"<select name='{name}'><option value=''>--</option>{opts}</select>"
-
-    content = f"""
-    <div class="card">
-        <h2>Questionario pre-allenamento</h2>
-        <div class="small">Da compilare prima dell'allenamento: rispondi solo per te stesso, nessun compagno può vedere le tue risposte singole.</div>
-        <form method="get"><label>Allenamento</label><select name="session_id" onchange="this.form.submit()">{session_options}</select></form>
-    </div>
-    <form method="post">
-        <input type="hidden" name="session_id" value="{selected_session_id or ''}">
-        <div class="card">
-            <label>Qualità del sonno (1 = pessima, 9 = ottima)</label>{scale('sonno', existing['sonno'] if existing else None)}
-            <label>Livello di stress (1 = nessuno, 9 = altissimo)</label>{scale('stress', existing['stress'] if existing else None)}
-            <label>Stanchezza generale (1 = nessuna, 9 = estrema)</label>{scale('stanchezza', existing['stanchezza'] if existing else None)}
-            <label>Dolore muscolare (1 = nessuno, 9 = fortissimo)</label>{scale('dolore', existing['dolore'] if existing else None)}
-            <button {'disabled' if not selected_session_id else ''}>Invia risposte</button>
-        </div>
-    </form>
-    <a class="btn btn-blue" href="/player">Area giocatore</a>
-    """
-    return page("Questionario pre-allenamento", f"Ciao {session.get('player_name')}", content)
-
-
-@app.route("/player/post-training", methods=["GET", "POST"])
-@login_required("player")
-def player_post_training():
-    player_id = session["player_id"]
-
-    sessions = db_query("SELECT id,training_date,title FROM training_sessions ORDER BY training_date DESC,id DESC LIMIT 30", fetch=True)
-    today_ids = [s["id"] for s in sessions if s["training_date"] == date.today().isoformat()]
-    selected_session_id = request.values.get("session_id") or (str(today_ids[0]) if today_ids else (str(sessions[0]["id"]) if sessions else None))
-
-    if request.method == "POST":
-        session_id = request.form.get("session_id")
-        try:
-            difficolta = int(request.form.get("difficolta"))
-            if not (1 <= difficolta <= 9):
-                raise ValueError
-        except (TypeError, ValueError):
-            flash("Seleziona un valore da 1 a 9.")
-            return redirect(url_for("player_post_training", session_id=session_id))
-
-        db_query("""
-            INSERT INTO post_training_responses (session_id, player_id, difficolta)
-            VALUES (?,?,?)
-            ON CONFLICT (session_id, player_id) DO UPDATE SET
-                difficolta=EXCLUDED.difficolta, submitted_at=now()
-        """, (session_id, player_id, difficolta))
-        flash("Risposta salvata. Grazie!")
-        return redirect(url_for("player_post_training", session_id=session_id))
-
-    existing = None
-    if selected_session_id:
-        rows = db_query(
-            "SELECT difficolta FROM post_training_responses WHERE session_id=? AND player_id=?",
-            (selected_session_id, player_id), fetch=True,
-        )
-        existing = rows[0] if rows else None
-
-    session_options = "".join(
-        f"<option value='{s['id']}' {'selected' if str(s['id']) == str(selected_session_id) else ''}>{ui_date(s['training_date'])} · {s['title']}</option>"
-        for s in sessions
-    )
-    current = existing["difficolta"] if existing else None
-    opts = "".join(f"<option value='{v}' {'selected' if current == v else ''}>{v}</option>" for v in range(1, 10))
-
-    content = f"""
-    <div class="card">
-        <h2>Questionario post-allenamento</h2>
-        <div class="small">Da compilare dopo l'allenamento: quanto è stato duro per te?</div>
-        <form method="get"><label>Allenamento</label><select name="session_id" onchange="this.form.submit()">{session_options}</select></form>
-    </div>
-    <form method="post">
-        <input type="hidden" name="session_id" value="{selected_session_id or ''}">
-        <div class="card">
-            <label>Difficoltà allenamento (1 = facilissimo, 9 = durissimo)</label>
-            <select name="difficolta"><option value=''>--</option>{opts}</select>
-            <button {'disabled' if not selected_session_id else ''}>Invia risposta</button>
-        </div>
-    </form>
-    <a class="btn btn-blue" href="/player">Area giocatore</a>
-    """
-    return page("Questionario post-allenamento", f"Ciao {session.get('player_name')}", content)
-
-
 @app.route("/player/matches")
 @login_required("player")
 def player_matches():
@@ -2209,51 +1953,9 @@ def player_votes(match_id):
 @login_required("coach")
 def coach_panel():
     content = """
-    <div class="card"><h2>Pannello allenatore</h2><div class="tabs"><a class="btn btn-blue" href="/coach/matches">Partite</a><a class="btn btn-green" href="/coach/formation">Formazione</a><a class="btn btn-dark" href="/coach/training">Allenamenti</a><a class="btn btn-dark" href="/coach/training-summary">Riepilogo allenamenti</a><a class="btn btn-blue" href="/coach/player-stats">Statistiche giocatori</a><a class="btn btn-dark" href="/coach/player-emails">Email giocatori</a><a class="btn" href="/logout">Esci</a></div></div>
+    <div class="card"><h2>Pannello allenatore</h2><div class="tabs"><a class="btn btn-blue" href="/coach/matches">Partite</a><a class="btn btn-green" href="/coach/formation">Formazione</a><a class="btn btn-dark" href="/coach/training">Allenamenti</a><a class="btn btn-dark" href="/coach/training-summary">Riepilogo allenamenti</a><a class="btn btn-blue" href="/coach/player-stats">Statistiche giocatori</a><a class="btn" href="/logout">Esci</a></div></div>
     """
     return page("Allenatore", "Gestione rapida da telefono", content)
-
-
-@app.route("/coach/player-emails", methods=["GET", "POST"])
-@login_required("coach")
-def coach_player_emails():
-    players = get_players()
-
-    if request.method == "POST":
-        for p in players:
-            email = request.form.get(f"email_{p['id']}", "").strip()
-            db_query("UPDATE players SET email=? WHERE id=?", (email, p["id"]))
-        flash("Email aggiornate.")
-        return redirect(url_for("coach_player_emails"))
-
-    rows = db_query("SELECT id, email FROM players", fetch=True)
-    email_by_id = {r["id"]: r["email"] or "" for r in rows}
-
-    smtp_configured = bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD)
-    smtp_warning = "" if smtp_configured else (
-        "<div class='card' style='border-color:#e03535;'>⚠ Invio email non configurato: "
-        "mancano le variabili d'ambiente SMTP_HOST / SMTP_USER / SMTP_PASSWORD su Render. "
-        "Finché non vengono impostate, nessun promemoria verrà inviato.</div>"
-    )
-
-    rows_html = "".join(
-        f"""<div class="player-row"><div class="player-title">{player_name(p)}</div>
-        <input type="email" name="email_{p['id']}" placeholder="email@esempio.it" value="{email_by_id.get(p['id'], '')}"></div>"""
-        for p in players
-    )
-
-    content = f"""
-    {smtp_warning}
-    <div class="card">
-        <h2>Email giocatori</h2>
-        <div class="small">A questi indirizzi verranno inviati i promemoria automatici nei giorni di allenamento, alle 15:00 (questionario pre-allenamento) e alle 21:00 (questionario post-allenamento).</div>
-    </div>
-    <form method="post">
-        <div class="card">{rows_html or 'Nessun giocatore.'}<button>Salva email</button></div>
-    </form>
-    <a class="btn btn-blue" href="/coach">Indietro</a>
-    """
-    return page("Email giocatori", "Promemoria automatici", content)
 
 
 
@@ -3019,10 +2721,10 @@ def coach_training():
 @login_required("coach")
 def coach_training_summary():
     """Elenco di tutti gli allenamenti con, per ciascuno, il conteggio di
-    presenti/assenti/infortunati, più le medie dei questionari pre/post
-    allenamento e quanti giocatori hanno risposto. Gli assenti sono calcolati
-    come rosa attuale meno presenti meno infortunati (stessa logica della
-    casella riepilogativa nella pagina "Allenamenti")."""
+    presenti/assenti/infortunati. Gli assenti sono calcolati come rosa
+    attuale meno presenti meno infortunati (stessa logica della casella
+    riepilogativa nella pagina "Allenamenti"), così i due numeri restano
+    sempre coerenti tra loro."""
     players = get_players()
     total_players = len(players)
 
@@ -3037,25 +2739,6 @@ def coach_training_summary():
         ORDER BY ts.training_date DESC, ts.id DESC
     """, fetch=True)
 
-    pre_rows = db_query("""
-        SELECT session_id, COUNT(*) AS risposte,
-               ROUND(AVG(sonno)::numeric,1) AS sonno_avg,
-               ROUND(AVG(stress)::numeric,1) AS stress_avg,
-               ROUND(AVG(stanchezza)::numeric,1) AS stanchezza_avg,
-               ROUND(AVG(dolore)::numeric,1) AS dolore_avg
-        FROM pre_training_responses
-        GROUP BY session_id
-    """, fetch=True)
-    pre_by_session = {r["session_id"]: r for r in pre_rows}
-
-    post_rows = db_query("""
-        SELECT session_id, COUNT(*) AS risposte,
-               ROUND(AVG(difficolta)::numeric,1) AS difficolta_avg
-        FROM post_training_responses
-        GROUP BY session_id
-    """, fetch=True)
-    post_by_session = {r["session_id"]: r for r in post_rows}
-
     rows_html = ""
     for s in sessions:
         presenti = s["presenti"] or 0
@@ -3063,42 +2746,25 @@ def coach_training_summary():
         registrati = s["registrati"] or 0
         assenti = max(0, total_players - presenti - infortunati)
         nota = "" if registrati > 0 else " <span class='small'>(presenze non ancora registrate)</span>"
-
-        pre = pre_by_session.get(s["id"])
-        post = post_by_session.get(s["id"])
-        pre_risposte = pre["risposte"] if pre else 0
-        post_risposte = post["risposte"] if post else 0
-
         rows_html += f"""
         <tr>
             <td style="text-align:left">{ui_date(s['training_date'])} · {s['title']}{nota}</td>
             <td>{presenti}</td>
             <td>{assenti}</td>
             <td>{infortunati}</td>
-            <td>{pre['sonno_avg'] if pre else '-'}</td>
-            <td>{pre['stress_avg'] if pre else '-'}</td>
-            <td>{pre['stanchezza_avg'] if pre else '-'}</td>
-            <td>{pre['dolore_avg'] if pre else '-'}</td>
-            <td>{pre_risposte}/{total_players}</td>
-            <td>{post['difficolta_avg'] if post else '-'}</td>
-            <td>{post_risposte}/{total_players}</td>
         </tr>
         """
 
     if not rows_html:
-        rows_html = "<tr><td colspan='11'>Nessun allenamento registrato.</td></tr>"
+        rows_html = "<tr><td colspan='4'>Nessun allenamento registrato.</td></tr>"
 
     content = f"""
     <div class="card">
         <h2>Riepilogo allenamenti</h2>
-        <div class="small">Presenze, assenze, infortuni e medie dei questionari per ogni allenamento (rosa attuale: {total_players} giocatori). Gli assenti non includono gli infortunati. Scorri la tabella per vedere tutte le colonne.</div>
+        <div class="small">Presenze, assenze e infortuni per ogni allenamento (rosa attuale: {total_players} giocatori). Gli assenti non includono gli infortunati.</div>
         <div class="table-wrap" style="margin-top:10px;">
             <table class="stats-table">
-                <thead><tr>
-                    <th>Allenamento</th><th>Presenti</th><th>Assenti</th><th>Infortunati</th>
-                    <th>Sonno</th><th>Stress</th><th>Stanch.</th><th>Dolore</th><th>Risp. pre</th>
-                    <th>Diffic.</th><th>Risp. post</th>
-                </tr></thead>
+                <thead><tr><th>Allenamento</th><th>Presenti</th><th>Assenti</th><th>Infortunati</th></tr></thead>
                 <tbody>{rows_html}</tbody>
             </table>
         </div>
@@ -3106,61 +2772,6 @@ def coach_training_summary():
     <a class="btn btn-blue" href="/coach">Indietro</a>
     """
     return page("Riepilogo allenamenti", "Presenze per allenamento", content)
-
-
-@app.route("/cron/training-reminders")
-def cron_training_reminders():
-    """Endpoint chiamato da un Cron Job esterno (es. Render Cron Job) ogni
-    10-15 minuti. Non richiede login: è protetto da un token segreto passato
-    come query string (?token=...), da confrontare con la variabile
-    d'ambiente CRON_SECRET.
-
-    Gestisce da solo l'ora legale/solare: calcola l'ora locale a Roma con
-    zoneinfo (non un offset UTC fisso) e invia il promemoria "pre" quando
-    sono le 15 locali e quello "post" quando sono le 21 locali, il giorno di
-    un allenamento. La tabella reminder_log evita invii doppi se il cron
-    scatta più volte nella stessa finestra oraria."""
-    token = request.args.get("token", "")
-    if not CRON_SECRET or token != CRON_SECRET:
-        return Response("Non autorizzato.", status=403)
-
-    now_rome = datetime.now(ROME_TZ)
-    today = now_rome.date().isoformat()
-
-    has_training = db_query("SELECT id FROM training_sessions WHERE training_date=?", (today,), fetch=True)
-    if not has_training:
-        return Response(f"Nessun allenamento oggi ({today}). Nessuna email inviata.", mimetype="text/plain")
-
-    results = []
-
-    def already_sent(kind):
-        rows = db_query("SELECT id FROM reminder_log WHERE training_date=? AND kind=?", (today, kind), fetch=True)
-        return bool(rows)
-
-    def mark_sent(kind):
-        try:
-            db_query("INSERT INTO reminder_log (training_date, kind) VALUES (?,?)", (today, kind))
-        except Exception:
-            pass  # UNIQUE(training_date,kind): un altro invio parallelo l'ha già registrato
-
-    if now_rome.hour == 15 and not already_sent("pre"):
-        mark_sent("pre")
-        inviate, fallite = send_training_reminders("pre", today)
-        results.append(f"Pre-allenamento: {len(inviate)} inviate, {len(fallite)} fallite.")
-        if fallite:
-            results.append("Fallite: " + "; ".join(fallite))
-
-    if now_rome.hour == 21 and not already_sent("post"):
-        mark_sent("post")
-        inviate, fallite = send_training_reminders("post", today)
-        results.append(f"Post-allenamento: {len(inviate)} inviate, {len(fallite)} fallite.")
-        if fallite:
-            results.append("Fallite: " + "; ".join(fallite))
-
-    if not results:
-        results.append(f"Ora locale Roma: {now_rome.strftime('%H:%M')} — fuori dalle finestre 15:00/21:00 o già inviato oggi.")
-
-    return Response("\n".join(results), mimetype="text/plain")
 
 
 if __name__ == "__main__":

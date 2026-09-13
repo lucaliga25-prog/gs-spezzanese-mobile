@@ -1539,14 +1539,16 @@ def player_history():
             COALESCE(a.assists, 0) AS assists,
             COALESCE(a.yellow_cards, 0) AS yellow_cards,
             COALESCE(a.red_cards, 0) AS red_cards,
-            COALESCE(v.media_voto, 0) AS media_voto
+            COALESCE(v.media_voto, 0) AS media_voto,
+            COALESCE(v.num_voti, 0) AS num_voti
         FROM appearances a
         JOIN matches m ON m.id=a.match_id
         LEFT JOIN (
             SELECT
                 match_id,
                 voted_player_id,
-                ROUND(AVG(rating)::numeric, 2) AS media_voto
+                ROUND(AVG(rating)::numeric, 2) AS media_voto,
+                COUNT(id) AS num_voti
             FROM player_votes
             WHERE voted_player_id=?
             GROUP BY match_id, voted_player_id
@@ -1597,6 +1599,10 @@ def player_history():
                     <div class="performance-stat">
                         <div class="performance-value">{r['media_voto']}</div>
                         <div class="performance-label">Voto</div>
+                    </div>
+                    <div class="performance-stat">
+                        <div class="performance-value">{r['num_voti']}</div>
+                        <div class="performance-label">N° voti</div>
                     </div>
                 </div>
             </div>

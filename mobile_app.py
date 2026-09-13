@@ -489,8 +489,11 @@ def compute_minutes_played(starter, subentrato, sostituito, half, minute, extra_
 
 
 def last_match():
-    # Per i voti deve prendere l'ultima partita con almeno un giocatore sopra i 10 minuti,
-    # non semplicemente l'ultima partita creata.
+    # Per i voti deve prendere l'ultima partita GIA' GIOCATA (data <= oggi)
+    # con almeno un giocatore sopra i 10 minuti, non semplicemente l'ultima
+    # partita creata (che potrebbe avere una data futura).
+    today = date.today().isoformat()
+
     rows = db_query("""
         SELECT
             m.id,
@@ -500,7 +503,8 @@ def last_match():
             m.home_away,
             m.result
         FROM matches m
-        WHERE EXISTS (
+        WHERE m.match_date <= ?
+          AND EXISTS (
             SELECT 1
             FROM appearances a
             WHERE a.match_id = m.id
@@ -508,19 +512,20 @@ def last_match():
         )
         ORDER BY m.match_date DESC, m.id DESC
         LIMIT 1
-    """, fetch=True)
+    """, (today,), fetch=True)
 
     if rows:
         return rows[0]
 
     # Fallback: se non esiste ancora nessuna formazione salvata,
-    # mostra comunque l'ultima partita inserita.
+    # mostra comunque l'ultima partita già giocata inserita.
     rows = db_query("""
         SELECT id, match_date, opponent, competition, home_away, result
         FROM matches
+        WHERE match_date <= ?
         ORDER BY match_date DESC, id DESC
         LIMIT 1
-    """, fetch=True)
+    """, (today,), fetch=True)
 
     return rows[0] if rows else None
 
@@ -546,17 +551,39 @@ def _award_cached(key, fn):
 
 
 def get_best_player_last_match():
-    """Giocatore con media voto più alta nell'ultima partita (CTE, 1 query)."""
+    """Giocatore con media voto più alta nell'ultima partita già giocata (CTE, 1 query)."""
+    today = date.today().isoformat()
     rows = db_query("""
         WITH last_m AS (
             SELECT m.id AS match_id, m.match_date, m.opponent, m.home_away
             FROM matches m
-            WHERE EXISTS (
+            WHERE m.match_date <= ?
+              AND EXISTS (
                 SELECT 1 FROM appearances a
                 WHERE a.match_id = m.id AND COALESCE(a.minutes,0) > 10
             )
             ORDER BY m.match_date DESC, m.id DESC
             LIMIT 1
+        ),
+        vote_stats AS (
+            SELECT
+                v.voted_player_id AS player_id,
+                ROUND(AVG(v.rating)::numeric, 2) AS media_voto,
+                COUNT(v.id) AS num_voti
+            FROM player_votes v
+            JOIN last_m lm ON lm.match_id = v.match_id
+            GROUP BY v.voted_player_id
+        ),
+        app_stats AS (
+            SELECT
+                a.player_id,
+                COALESCE(SUM(a.goals),0)   AS stat_gol,
+                COALESCE(SUM(a.assists),0) AS stat_assist,
+                COALESCE(SUM(a.minutes),0) AS stat_minuti,
+                COUNT(a.id)                AS stat_presenze
+            FROM appearances a
+            JOIN last_m lm ON lm.match_id = a.match_id
+            GROUP BY a.player_id
         )
         SELECT
             p.id,
@@ -568,21 +595,19 @@ def get_best_player_last_match():
             lm.match_date,
             lm.opponent,
             lm.home_away,
-            ROUND(AVG(v.rating)::numeric, 2) AS media_voto,
-            COUNT(v.id) AS num_voti,
-            COALESCE(SUM(a.goals),0)   AS stat_gol,
-            COALESCE(SUM(a.assists),0) AS stat_assist,
-            COALESCE(SUM(a.minutes),0) AS stat_minuti,
-            COUNT(a.id)                AS stat_presenze
-        FROM last_m lm
-        JOIN player_votes v ON v.match_id = lm.match_id
-        JOIN players p ON p.id = v.voted_player_id
-        LEFT JOIN appearances a ON a.player_id = p.id
-        GROUP BY p.id, p.first_name, p.last_name, p.role,
-                 p.photo_data, p.photo_mime, lm.match_date, lm.opponent, lm.home_away
-        ORDER BY media_voto DESC, num_voti DESC
+            vs.media_voto,
+            vs.num_voti,
+            COALESCE(aps.stat_gol,0)      AS stat_gol,
+            COALESCE(aps.stat_assist,0)   AS stat_assist,
+            COALESCE(aps.stat_minuti,0)   AS stat_minuti,
+            COALESCE(aps.stat_presenze,0) AS stat_presenze
+        FROM vote_stats vs
+        JOIN players p ON p.id = vs.player_id
+        CROSS JOIN last_m lm
+        LEFT JOIN app_stats aps ON aps.player_id = vs.player_id
+        ORDER BY vs.media_voto DESC, vs.num_voti DESC
         LIMIT 1
-    """, fetch=True)
+    """, (today,), fetch=True)
     return rows[0] if rows else None
 
 

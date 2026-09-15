@@ -2015,6 +2015,22 @@ def coach_panel():
     return page("Allenatore", "Gestione rapida da telefono", content)
 
 
+ROLE_CHOICES = [
+    ("POR", "Portiere"),
+    ("TD", "Terzino Destro"),
+    ("TS", "Terzino Sinistro"),
+    ("DC", "Difensore Centrale"),
+    ("CC", "Centrocampista Centrale"),
+    ("CDC", "Centrocampista Difensivo"),
+    ("COC", "Centrocampista Offensivo"),
+    ("ATT", "Attaccante"),
+    ("AS", "Ala Sinistra"),
+    ("AD", "Ala Destra"),
+    ("ED", "Esterno Destro"),
+    ("ES", "Esterno Sinistro"),
+]
+
+
 @app.route("/coach/players", methods=["GET", "POST"])
 @login_required("coach")
 def coach_players():
@@ -2025,13 +2041,18 @@ def coach_players():
             first_name = request.form.get("first_name", "").strip()
             last_name = request.form.get("last_name", "").strip()
             birth_date = request.form.get("birth_date", "").strip()
+            role1 = request.form.get("role1", "").strip()
+            role2 = request.form.get("role2", "").strip()
 
             if not first_name or not last_name:
                 flash("Inserisci nome e cognome del giocatore.")
+            elif not role1:
+                flash("Seleziona il ruolo principale del giocatore.")
             else:
+                role = f"{role1}/{role2}" if role2 else role1
                 db_query(
-                    "INSERT INTO players (first_name, last_name, birth_date, role) VALUES (?, ?, ?, '')",
-                    (first_name.strip().title(), last_name.strip().title(), birth_date),
+                    "INSERT INTO players (first_name, last_name, birth_date, role) VALUES (?, ?, ?, ?)",
+                    (first_name.strip().title(), last_name.strip().title(), birth_date, role),
                 )
                 flash(f"Giocatore {first_name.strip().title()} {last_name.strip().title()} aggiunto alla rosa.")
 
@@ -2050,23 +2071,27 @@ def coach_players():
         return redirect(url_for("coach_players"))
 
     players = db_query("""
-        SELECT id, first_name, last_name, COALESCE(birth_date,'') AS birth_date
+        SELECT id, first_name, last_name, COALESCE(birth_date,'') AS birth_date, COALESCE(role,'') AS role
         FROM players
         WHERE LOWER(TRIM(COALESCE(role,''))) NOT IN ('mister', 'pres')
         ORDER BY last_name, first_name
     """, fetch=True)
+
+    role1_options = "".join(f'<option value="{code}">{label}</option>' for code, label in ROLE_CHOICES)
+    role2_options = '<option value="">Nessuno</option>' + role1_options
 
     player_rows = ""
     for p in players:
         full_name = f"{p['last_name']} {p['first_name']}"
         safe_name = full_name.replace('"', "&quot;")
         nascita = ui_date(p["birth_date"]) if p["birth_date"] else "Data di nascita non impostata"
+        role_display = " / ".join(r.strip() for r in (p["role"] or "").split("/") if r.strip()) or "Ruolo non impostato"
         player_rows += f"""
         <div class="player-row">
             <div class="row">
                 <div>
                     <div class="player-title">{full_name}</div>
-                    <div class="small">{nascita}</div>
+                    <div class="small">{role_display} · {nascita}</div>
                 </div>
                 <button type="button" class="btn-red small-btn"
                         data-id="{p['id']}" data-name="{safe_name}"
@@ -2102,6 +2127,15 @@ def coach_players():
                 <input name="last_name" required>
                 <label>Data di nascita</label>
                 <input type="date" name="birth_date">
+                <label>Ruolo principale</label>
+                <select name="role1" required>
+                    <option value="">Seleziona ruolo</option>
+                    {role1_options}
+                </select>
+                <label>Ruolo secondario (facoltativo)</label>
+                <select name="role2">
+                    {role2_options}
+                </select>
                 <div class="modal-actions">
                     <button type="button" class="btn-dark" onclick="document.getElementById('add-modal').classList.remove('open')">Annulla</button>
                     <button type="submit" class="btn-green">Salva</button>

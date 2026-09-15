@@ -1151,6 +1151,21 @@ button:disabled,.btn:disabled{opacity:.5;cursor:not-allowed;box-shadow:none}
 
 .award-card-wrap{display:flex;flex-direction:column;align-items:center;margin:0 auto 18px;max-width:300px;}
 .award-card-wrap svg{width:100%;max-width:280px;height:auto;}
+/* ── MODALE ── */
+.modal-overlay{
+  position:fixed;inset:0;background:rgba(0,0,0,.65);
+  display:none;align-items:center;justify-content:center;
+  z-index:1000;padding:16px;
+}
+.modal-overlay.open{display:flex}
+.modal-box{
+  background:var(--green-card);border:1px solid var(--border-light);
+  border-radius:16px;padding:20px;max-width:420px;width:100%;
+  box-shadow:0 10px 34px rgba(0,0,0,.55);
+}
+.modal-box h3{margin:0 0 10px;color:var(--text)}
+.modal-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
+
 </style>
 """
 
@@ -1651,17 +1666,18 @@ def player_stats():
 
     start_date = request.args.get("start_date", "").strip()
     end_date = request.args.get("end_date", "").strip()
+    competition = request.args.get("competition", "").strip()
 
     today = date.today().isoformat()
 
     start_filter = start_date if start_date else "1900-01-01"
     end_filter = end_date if end_date else "2999-12-31"
 
-    rows = get_player_stats_rows(start_filter, end_filter, player_id_filter=player_id)
+    rows = get_player_stats_rows(start_filter, end_filter, player_id_filter=player_id, competition_filter=competition)
     r = rows[0] if rows else None
 
     if r is None:
-        table_rows = "<tr><td colspan='12'>Nessun dato disponibile (ruolo mister/presidente non ha statistiche).</td></tr>"
+        table_rows = "<tr><td colspan='13'>Nessun dato disponibile (ruolo mister/presidente non ha statistiche).</td></tr>"
     else:
         table_rows = f"""
         <tr>
@@ -1677,6 +1693,7 @@ def player_stats():
             <td>{r['espulsioni']}</td>
             <td>{r['all_presenti']}</td>
             <td><b>{r['media_voto']}</b></td>
+            <td>{r['bonus']}</td>
         </tr>
         """
 
@@ -1694,6 +1711,14 @@ def player_stats():
                 <div>
                     <label>Al</label>
                     <input type="date" name="end_date" value="{end_date or today}">
+                </div>
+                <div>
+                    <label>Competizione</label>
+                    <select name="competition">
+                        <option value="" {"selected" if not competition else ""}>Entrambe</option>
+                        <option value="Campionato" {"selected" if competition == "Campionato" else ""}>Campionato</option>
+                        <option value="Coppa" {"selected" if competition == "Coppa" else ""}>Coppa</option>
+                    </select>
                 </div>
             </div>
             <button class="btn-blue">Filtra periodo</button>
@@ -1718,6 +1743,7 @@ def player_stats():
                         <th>Esp</th>
                         <th>Allen.</th>
                         <th>Voto</th>
+                        <th>Bonus</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1984,13 +2010,141 @@ def player_votes(match_id):
 @login_required("coach")
 def coach_panel():
     content = """
-    <div class="card"><h2>Pannello allenatore</h2><div class="tabs"><a class="btn btn-blue" href="/coach/matches">Partite</a><a class="btn btn-green" href="/coach/formation">Formazione</a><a class="btn btn-dark" href="/coach/training">Allenamenti</a><a class="btn btn-dark" href="/coach/training-summary">Riepilogo allenamenti</a><a class="btn btn-blue" href="/coach/player-stats">Statistiche giocatori</a><a class="btn" href="/logout">Esci</a></div></div>
+    <div class="card"><h2>Pannello allenatore</h2><div class="tabs"><a class="btn btn-blue" href="/coach/matches">Partite</a><a class="btn btn-green" href="/coach/formation">Formazione</a><a class="btn btn-dark" href="/coach/training">Allenamenti</a><a class="btn btn-dark" href="/coach/training-summary">Riepilogo allenamenti</a><a class="btn btn-blue" href="/coach/player-stats">Statistiche giocatori</a><a class="btn btn-green" href="/coach/players">Rosa giocatori</a><a class="btn" href="/logout">Esci</a></div></div>
     """
     return page("Allenatore", "Gestione rapida da telefono", content)
 
 
+@app.route("/coach/players", methods=["GET", "POST"])
+@login_required("coach")
+def coach_players():
+    if request.method == "POST":
+        action = request.form.get("action")
 
-def get_player_stats_rows(start_filter, end_filter, player_id_filter=None):
+        if action == "add":
+            first_name = request.form.get("first_name", "").strip()
+            last_name = request.form.get("last_name", "").strip()
+            birth_date = request.form.get("birth_date", "").strip()
+
+            if not first_name or not last_name:
+                flash("Inserisci nome e cognome del giocatore.")
+            else:
+                db_query(
+                    "INSERT INTO players (first_name, last_name, birth_date, role) VALUES (?, ?, ?, '')",
+                    (first_name.strip().title(), last_name.strip().title(), birth_date),
+                )
+                flash(f"Giocatore {first_name.strip().title()} {last_name.strip().title()} aggiunto alla rosa.")
+
+        elif action == "delete":
+            player_id = request.form.get("player_id", "").strip()
+            row = db_query(
+                "SELECT first_name, last_name FROM players WHERE id=?",
+                (player_id,), fetch=True
+            )
+            if row:
+                db_query("DELETE FROM players WHERE id=?", (player_id,))
+                flash(f"Giocatore {row[0]['first_name']} {row[0]['last_name']} rimosso dalla rosa.")
+            else:
+                flash("Giocatore non trovato.")
+
+        return redirect(url_for("coach_players"))
+
+    players = db_query("""
+        SELECT id, first_name, last_name, COALESCE(birth_date,'') AS birth_date
+        FROM players
+        WHERE LOWER(TRIM(COALESCE(role,''))) NOT IN ('mister', 'pres')
+        ORDER BY last_name, first_name
+    """, fetch=True)
+
+    player_rows = ""
+    for p in players:
+        full_name = f"{p['last_name']} {p['first_name']}"
+        safe_name = full_name.replace('"', "&quot;")
+        nascita = ui_date(p["birth_date"]) if p["birth_date"] else "Data di nascita non impostata"
+        player_rows += f"""
+        <div class="player-row">
+            <div class="row">
+                <div>
+                    <div class="player-title">{full_name}</div>
+                    <div class="small">{nascita}</div>
+                </div>
+                <button type="button" class="btn-red small-btn"
+                        data-id="{p['id']}" data-name="{safe_name}"
+                        onclick="openDeleteModal(this)">Rimuovi</button>
+            </div>
+        </div>
+        """
+
+    if not player_rows:
+        player_rows = "<div class='small'>Nessun giocatore in rosa.</div>"
+
+    content = f"""
+    <div class="card">
+        <h2>Rosa giocatori ({len(players)})</h2>
+        <div class="small">Aggiungi un nuovo giocatore alla rosa oppure rimuovine uno esistente.</div>
+        <button type="button" class="btn-green" onclick="document.getElementById('add-modal').classList.add('open')">+ Aggiungi giocatore</button>
+    </div>
+
+    <div class="card">
+        {player_rows}
+    </div>
+
+    <a class="btn btn-blue" href="/coach">Indietro</a>
+
+    <div class="modal-overlay" id="add-modal">
+        <div class="modal-box">
+            <h3>Aggiungi giocatore</h3>
+            <form method="post">
+                <input type="hidden" name="action" value="add">
+                <label>Nome</label>
+                <input name="first_name" required>
+                <label>Cognome</label>
+                <input name="last_name" required>
+                <label>Data di nascita</label>
+                <input type="date" name="birth_date">
+                <div class="modal-actions">
+                    <button type="button" class="btn-dark" onclick="document.getElementById('add-modal').classList.remove('open')">Annulla</button>
+                    <button type="submit" class="btn-green">Salva</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="delete-modal">
+        <div class="modal-box">
+            <h3>Rimuovere giocatore?</h3>
+            <p class="small" id="delete-modal-text">Questa azione cancella anche presenze, voti e statistiche legate al giocatore. Non si può annullare.</p>
+            <form method="post">
+                <input type="hidden" name="action" value="delete">
+                <input type="hidden" name="player_id" id="delete-player-id">
+                <div class="modal-actions">
+                    <button type="button" class="btn-dark" onclick="document.getElementById('delete-modal').classList.remove('open')">Annulla</button>
+                    <button type="submit" class="btn-red">Rimuovi</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+    function openDeleteModal(btn) {{
+        document.getElementById('delete-player-id').value = btn.dataset.id;
+        document.getElementById('delete-modal-text').innerText =
+            'Stai per rimuovere ' + btn.dataset.name + '. Questa azione cancella anche presenze, voti e statistiche legate al giocatore. Non si può annullare.';
+        document.getElementById('delete-modal').classList.add('open');
+    }}
+    </script>
+    """
+
+    return page("Rosa giocatori", "Area allenatore", content)
+
+
+
+def get_player_stats_rows(start_filter, end_filter, player_id_filter=None, competition_filter=None):
+    """competition_filter: None/'' = Campionato + Coppa (default), oppure 'Campionato' o 'Coppa'."""
+    competition_filter = (competition_filter or "").strip()
+    comp_condition = " AND m.competition = ?" if competition_filter else ""
+    comp_params = (competition_filter,) if competition_filter else ()
+
     return db_query("""
         SELECT
             p.id,
@@ -2007,7 +2161,13 @@ def get_player_stats_rows(start_filter, end_filter, player_id_filter=None):
             COALESCE(ms.ammonizioni, 0) AS ammonizioni,
             COALESCE(ms.espulsioni, 0) AS espulsioni,
             COALESCE(tr.all_presenti, 0) AS all_presenti,
-            COALESCE(vt.media_voto, 0) AS media_voto
+            COALESCE(vt.media_voto, 0) AS media_voto,
+            COALESCE(
+                ROUND(
+                    (COALESCE(ms.gol,0) + COALESCE(ms.assist,0))::numeric
+                    / NULLIF(COALESCE(ms.minuti,0), 0),
+                3),
+            0) AS bonus
 
         FROM players p
 
@@ -2023,7 +2183,7 @@ def get_player_stats_rows(start_filter, end_filter, player_id_filter=None):
                 SUM(a.red_cards) AS espulsioni
             FROM appearances a
             JOIN matches m ON m.id=a.match_id
-            WHERE m.match_date BETWEEN ? AND ?
+            WHERE m.match_date BETWEEN ? AND ?""" + comp_condition + """
             GROUP BY a.player_id
         ) ms ON ms.player_id=p.id
 
@@ -2033,7 +2193,7 @@ def get_player_stats_rows(start_filter, end_filter, player_id_filter=None):
                 SUM(CASE WHEN COALESCE(a.subentrato,0)=1 THEN 1 ELSE 0 END) AS subentrato
             FROM appearances a
             JOIN matches m ON m.id=a.match_id
-            WHERE m.match_date BETWEEN ? AND ?
+            WHERE m.match_date BETWEEN ? AND ?""" + comp_condition + """
             GROUP BY a.player_id
         ) si ON si.player_id=p.id
 
@@ -2043,7 +2203,7 @@ def get_player_stats_rows(start_filter, end_filter, player_id_filter=None):
                 SUM(CASE WHEN COALESCE(a.sostituito,0)=1 THEN 1 ELSE 0 END) AS sostituito
             FROM appearances a
             JOIN matches m ON m.id=a.match_id
-            WHERE m.match_date BETWEEN ? AND ?
+            WHERE m.match_date BETWEEN ? AND ?""" + comp_condition + """
             GROUP BY a.player_id
         ) so ON so.player_id=p.id
 
@@ -2063,7 +2223,7 @@ def get_player_stats_rows(start_filter, end_filter, player_id_filter=None):
                 ROUND(AVG(v.rating)::numeric, 2) AS media_voto
             FROM player_votes v
             JOIN matches m ON m.id=v.match_id
-            WHERE m.match_date BETWEEN ? AND ?
+            WHERE m.match_date BETWEEN ? AND ?""" + comp_condition + """
             GROUP BY v.voted_player_id
         ) vt ON vt.player_id=p.id
 
@@ -2071,11 +2231,11 @@ def get_player_stats_rows(start_filter, end_filter, player_id_filter=None):
           """ + ("AND p.id=?" if player_id_filter is not None else "") + """
         ORDER BY COALESCE(ms.minuti,0) DESC, p.last_name, p.first_name
     """, (
-        start_filter, end_filter,
-        start_filter, end_filter,
-        start_filter, end_filter,
-        start_filter, end_filter,
-        start_filter, end_filter,
+        (start_filter, end_filter) + comp_params +
+        (start_filter, end_filter) + comp_params +
+        (start_filter, end_filter) + comp_params +
+        (start_filter, end_filter) +
+        (start_filter, end_filter) + comp_params
     ) + ((player_id_filter,) if player_id_filter is not None else ()), fetch=True)
 
 
@@ -2084,6 +2244,7 @@ def get_player_stats_rows(start_filter, end_filter, player_id_filter=None):
 def coach_player_stats():
     start_date = request.args.get("start_date", "").strip()
     end_date = request.args.get("end_date", "").strip()
+    competition = request.args.get("competition", "").strip()
 
     today = date.today().isoformat()
 
@@ -2091,7 +2252,7 @@ def coach_player_stats():
     start_filter = start_date if start_date else "1900-01-01"
     end_filter = end_date if end_date else "2999-12-31"
 
-    rows = get_player_stats_rows(start_filter, end_filter)
+    rows = get_player_stats_rows(start_filter, end_filter, competition_filter=competition)
 
     table_rows = ""
 
@@ -2110,16 +2271,17 @@ def coach_player_stats():
             <td>{r['espulsioni']}</td>
             <td>{r['all_presenti']}</td>
             <td><b>{r['media_voto']}</b></td>
+            <td>{r['bonus']}</td>
         </tr>
         """
 
     if not table_rows:
-        table_rows = "<tr><td colspan='12'>Nessun giocatore presente.</td></tr>"
+        table_rows = "<tr><td colspan='13'>Nessun giocatore presente.</td></tr>"
 
     content = f"""
     <div class="card">
         <h2>Statistiche giocatori</h2>
-        <div class="small">Filtra le statistiche per periodo. Se nel periodo non ci sono dati, i giocatori vengono mostrati con tutti i valori a 0.</div>
+        <div class="small">Filtra le statistiche per periodo e competizione. Se nel periodo non ci sono dati, i giocatori vengono mostrati con tutti i valori a 0.</div>
 
         <form method="get">
             <div class="inline">
@@ -2131,10 +2293,18 @@ def coach_player_stats():
                     <label>Al</label>
                     <input type="date" name="end_date" value="{end_date or today}">
                 </div>
+                <div>
+                    <label>Competizione</label>
+                    <select name="competition">
+                        <option value="" {"selected" if not competition else ""}>Entrambe</option>
+                        <option value="Campionato" {"selected" if competition == "Campionato" else ""}>Campionato</option>
+                        <option value="Coppa" {"selected" if competition == "Coppa" else ""}>Coppa</option>
+                    </select>
+                </div>
             </div>
             <button class="btn-blue">Filtra periodo</button>
             <a class="btn btn-dark" href="/coach/player-stats">Azzera filtro</a>
-            <a class="btn btn-green" href="/coach/player-stats/pdf?start_date={start_date}&end_date={end_date}">Scarica PDF</a>
+            <a class="btn btn-green" href="/coach/player-stats/pdf?start_date={start_date}&end_date={end_date}&competition={competition}">Scarica PDF</a>
         </form>
     </div>
 
@@ -2155,6 +2325,7 @@ def coach_player_stats():
                         <th>Esp</th>
                         <th>Allen.</th>
                         <th>Voto</th>
+                        <th>Bonus</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -2175,11 +2346,12 @@ def coach_player_stats():
 def coach_player_stats_pdf():
     start_date = request.args.get("start_date", "").strip()
     end_date = request.args.get("end_date", "").strip()
+    competition = request.args.get("competition", "").strip()
 
     start_filter = start_date if start_date else "1900-01-01"
     end_filter = end_date if end_date else "2999-12-31"
 
-    rows = get_player_stats_rows(start_filter, end_filter)
+    rows = get_player_stats_rows(start_filter, end_filter, competition_filter=competition)
 
     buffer = BytesIO()
     doc = SimpleDocTemplate(
@@ -2191,20 +2363,21 @@ def coach_player_stats_pdf():
     styles = getSampleStyleSheet()
 
     periodo = f"{ui_date(start_date) if start_date else 'inizio'} — {ui_date(end_date) if end_date else 'oggi'}"
+    comp_label = competition if competition else "Campionato + Coppa"
     story = [
         Paragraph(f"{TEAM_NAME} — Statistiche giocatori", styles["Title"]),
-        Paragraph(f"Periodo: {periodo} · Stagione {TEAM_SEASON}", styles["Normal"]),
+        Paragraph(f"Periodo: {periodo} · Competizione: {comp_label} · Stagione {TEAM_SEASON}", styles["Normal"]),
         Spacer(1, 0.5 * cm),
     ]
 
-    header = ["Giocatore", "Ruolo", "Pres.", "Tit.", "Sub.", "Sost.", "Min.", "Gol", "Ass.", "Amm.", "Esp.", "All.", "Media"]
+    header = ["Giocatore", "Ruolo", "Pres.", "Tit.", "Sub.", "Sost.", "Min.", "Gol", "Ass.", "Amm.", "Esp.", "All.", "Media", "Bonus"]
     table_data = [header]
     for r in rows:
         table_data.append([
             r["player_name"], r["role"] or "-",
             r["presenze"], r["titolare"], r["subentrato"], r["sostituito"],
             r["minuti"], r["gol"], r["assist"], r["ammonizioni"], r["espulsioni"],
-            r["all_presenti"], r["media_voto"],
+            r["all_presenti"], r["media_voto"], r["bonus"],
         ])
 
     if len(table_data) == 1:

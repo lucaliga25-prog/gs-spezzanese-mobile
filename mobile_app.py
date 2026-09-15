@@ -2198,8 +2198,8 @@ def get_player_stats_rows(start_filter, end_filter, player_id_filter=None, compe
             COALESCE(vt.media_voto, 0) AS media_voto,
             COALESCE(
                 ROUND(
-                    (COALESCE(ms.gol,0) + COALESCE(ms.assist,0))::numeric
-                    / NULLIF(COALESCE(ms.minuti,0), 0),
+                    COALESCE(ms.minuti,0)::numeric
+                    / NULLIF(COALESCE(ms.gol,0) + COALESCE(ms.assist,0), 0),
                 3),
             0) AS bonus
 

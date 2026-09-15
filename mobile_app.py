@@ -1743,7 +1743,7 @@ def player_stats():
                         <th>Esp</th>
                         <th>Allen.</th>
                         <th>Voto</th>
-                        <th>Bonus</th>
+                        <th>Media Min/Bonus</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -2200,7 +2200,7 @@ def get_player_stats_rows(start_filter, end_filter, player_id_filter=None, compe
                 ROUND(
                     COALESCE(ms.minuti,0)::numeric
                     / NULLIF(COALESCE(ms.gol,0) + COALESCE(ms.assist,0), 0),
-                3),
+                0)::int,
             0) AS bonus
 
         FROM players p
@@ -2359,7 +2359,7 @@ def coach_player_stats():
                         <th>Esp</th>
                         <th>Allen.</th>
                         <th>Voto</th>
-                        <th>Bonus</th>
+                        <th>Media Min/Bonus</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -2404,7 +2404,7 @@ def coach_player_stats_pdf():
         Spacer(1, 0.5 * cm),
     ]
 
-    header = ["Giocatore", "Ruolo", "Pres.", "Tit.", "Sub.", "Sost.", "Min.", "Gol", "Ass.", "Amm.", "Esp.", "All.", "Media", "Bonus"]
+    header = ["Giocatore", "Ruolo", "Pres.", "Tit.", "Sub.", "Sost.", "Min.", "Gol", "Ass.", "Amm.", "Esp.", "All.", "Media", "Media Min/Bonus"]
     table_data = [header]
     for r in rows:
         table_data.append([

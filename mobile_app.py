@@ -2208,7 +2208,7 @@ def get_player_stats_rows(start_filter, end_filter, player_id_filter=None, compe
         LEFT JOIN (
             SELECT
                 a.player_id,
-                COUNT(*) AS presenze,
+                SUM(CASE WHEN a.starter=1 OR COALESCE(a.subentrato,0)=1 THEN 1 ELSE 0 END) AS presenze,
                 SUM(CASE WHEN a.starter=1 THEN 1 ELSE 0 END) AS titolare,
                 SUM(a.minutes) AS minuti,
                 SUM(a.goals) AS gol,

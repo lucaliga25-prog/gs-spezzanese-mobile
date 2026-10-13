@@ -618,7 +618,32 @@ def get_best_player_last_month():
     last_month_end = first_this_month - timedelta(days=1)
     last_month_start = last_month_end.replace(day=1)
 
+    start_s = last_month_start.isoformat()
+    end_s = last_month_end.isoformat()
+
     rows = db_query("""
+        WITH vote_stats AS (
+            SELECT
+                v.voted_player_id AS player_id,
+                ROUND(AVG(v.rating)::numeric, 2) AS media_voto,
+                COUNT(v.id) AS num_voti
+            FROM player_votes v
+            JOIN matches m ON m.id = v.match_id
+            WHERE m.match_date BETWEEN ? AND ?
+            GROUP BY v.voted_player_id
+        ),
+        app_stats AS (
+            SELECT
+                a.player_id,
+                COALESCE(SUM(a.goals),0)   AS stat_gol,
+                COALESCE(SUM(a.assists),0) AS stat_assist,
+                COALESCE(SUM(a.minutes),0) AS stat_minuti,
+                COUNT(DISTINCT a.match_id) AS stat_presenze
+            FROM appearances a
+            JOIN matches m ON m.id = a.match_id
+            WHERE m.match_date BETWEEN ? AND ?
+            GROUP BY a.player_id
+        )
         SELECT
             p.id,
             p.first_name,
@@ -626,25 +651,18 @@ def get_best_player_last_month():
             COALESCE(p.role,'') AS role,
             COALESCE(p.photo_data,'') AS photo_data,
             COALESCE(p.photo_mime,'image/jpeg') AS photo_mime,
-            ROUND(AVG(v.rating)::numeric, 2) AS media_voto,
-            COUNT(v.id) AS num_voti,
-            COALESCE(SUM(CASE WHEN m.match_date BETWEEN ? AND ? THEN a.goals   ELSE 0 END),0) AS stat_gol,
-            COALESCE(SUM(CASE WHEN m.match_date BETWEEN ? AND ? THEN a.assists ELSE 0 END),0) AS stat_assist,
-            COALESCE(SUM(CASE WHEN m.match_date BETWEEN ? AND ? THEN a.minutes ELSE 0 END),0) AS stat_minuti,
-            COUNT(DISTINCT CASE WHEN m.match_date BETWEEN ? AND ? THEN a.match_id END)        AS stat_presenze
-        FROM player_votes v
-        JOIN matches m ON m.id = v.match_id
-        JOIN players p ON p.id = v.voted_player_id
-        LEFT JOIN appearances a ON a.player_id = p.id
-        WHERE m.match_date BETWEEN ? AND ?
-        GROUP BY p.id, p.first_name, p.last_name, p.role, p.photo_data, p.photo_mime
-        ORDER BY media_voto DESC, num_voti DESC
+            vs.media_voto,
+            vs.num_voti,
+            COALESCE(aps.stat_gol,0)      AS stat_gol,
+            COALESCE(aps.stat_assist,0)   AS stat_assist,
+            COALESCE(aps.stat_minuti,0)   AS stat_minuti,
+            COALESCE(aps.stat_presenze,0) AS stat_presenze
+        FROM vote_stats vs
+        JOIN players p ON p.id = vs.player_id
+        LEFT JOIN app_stats aps ON aps.player_id = vs.player_id
+        ORDER BY vs.media_voto DESC, vs.num_voti DESC
         LIMIT 1
-    """, (last_month_start.isoformat(), last_month_end.isoformat(),
-         last_month_start.isoformat(), last_month_end.isoformat(),
-         last_month_start.isoformat(), last_month_end.isoformat(),
-         last_month_start.isoformat(), last_month_end.isoformat(),
-         last_month_start.isoformat(), last_month_end.isoformat()), fetch=True)
+    """, (start_s, end_s, start_s, end_s), fetch=True)
 
     if rows:
         rows[0]["month_label"] = last_month_end.strftime("%B %Y")

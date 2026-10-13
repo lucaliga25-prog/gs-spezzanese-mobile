@@ -580,7 +580,7 @@ def get_best_player_last_match():
                 COALESCE(SUM(a.goals),0)   AS stat_gol,
                 COALESCE(SUM(a.assists),0) AS stat_assist,
                 COALESCE(SUM(a.minutes),0) AS stat_minuti,
-                COUNT(a.id)                AS stat_presenze
+                SUM(CASE WHEN a.starter=1 OR COALESCE(a.subentrato,0)=1 THEN 1 ELSE 0 END) AS stat_presenze
             FROM appearances a
             JOIN last_m lm ON lm.match_id = a.match_id
             GROUP BY a.player_id
@@ -638,7 +638,7 @@ def get_best_player_last_month():
                 COALESCE(SUM(a.goals),0)   AS stat_gol,
                 COALESCE(SUM(a.assists),0) AS stat_assist,
                 COALESCE(SUM(a.minutes),0) AS stat_minuti,
-                COUNT(DISTINCT a.match_id) AS stat_presenze
+                COUNT(DISTINCT CASE WHEN a.starter=1 OR COALESCE(a.subentrato,0)=1 THEN a.match_id END) AS stat_presenze
             FROM appearances a
             JOIN matches m ON m.id = a.match_id
             WHERE m.match_date BETWEEN ? AND ?
@@ -1465,7 +1465,7 @@ def player_card():
         WITH app_stats AS (
             SELECT
                 a.player_id,
-                COUNT(*) AS presenze,
+                SUM(CASE WHEN a.starter=1 OR COALESCE(a.subentrato,0)=1 THEN 1 ELSE 0 END) AS presenze,
                 COALESCE(SUM(a.goals), 0) AS gol,
                 COALESCE(SUM(a.assists), 0) AS assist
             FROM appearances a

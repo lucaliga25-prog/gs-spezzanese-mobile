@@ -83,6 +83,30 @@ def get_staff_role(first_name, last_name):
     return _STAFF_BY_NAME.get((_norm_name(first_name), _norm_name(last_name)))
 
 
+# Preparatore atletico: accesso come i mister ma con etichetta dedicata.
+PREPARATORE_NAMES = {("lampos", "lampos")}
+
+SPECIAL_AREA_LABELS = {
+    "MISTER": "Area Allenatore",
+    "PREP": "Area Preparatore",
+    "PRES": "Area Presidente",
+    "DS": "Area Direttore sportivo",
+    "DT": "Area Direttore tecnico",
+}
+
+
+def get_special_role(first_name, last_name):
+    """Chiave del ruolo speciale (MISTER/PREP/PRES/DS/DT) o None per i calciatori."""
+    key = (_norm_name(first_name), _norm_name(last_name))
+    if key in PREPARATORE_NAMES:
+        return "PREP"
+    if key in {(_norm_name(f), _norm_name(l)) for f, l in AUTHORIZED_PRES_ACCESS}:
+        return "PRES"
+    if key in {(_norm_name(f), _norm_name(l)) for f, l in AUTHORIZED_COACH_PLAYER_ACCESS}:
+        return "MISTER"
+    return _STAFF_BY_NAME.get(key)
+
+
 def is_authorized_pres_name(first_name, last_name):
     return (_norm_name(first_name), _norm_name(last_name)) in _AUTHORIZED_PRES_NORMALIZED
 
@@ -1491,6 +1515,21 @@ def player_home():
         flash("Foto figurina aggiornata correttamente.")
         return redirect(url_for("player_home"))
 
+    me = db_query("SELECT first_name, last_name FROM players WHERE id=?", (voter_id,), fetch=True)
+    special = get_special_role(me[0]["first_name"], me[0]["last_name"]) if me else None
+
+    if special:
+        area = SPECIAL_AREA_LABELS[special]
+        return page(area, f"Ciao {session.get('player_name')}", f"""
+        <div class="card">
+            <h2>{area}</h2>
+            <a class="btn btn-blue" href="/player/matches">Vota partita</a>
+            <a class="btn" style="background:linear-gradient(135deg,#b8860b,#f5c518);color:#0a0a0a;font-weight:900;" href="/awards">⚡ Figurine Premi</a>
+            <a class="btn" style="background:linear-gradient(135deg,#b3202a,#1a7a2e);color:#fff;font-weight:900;" href="/player/christmas-gift">🎄 Christmas gift</a>
+            <a class="btn" href="/logout">Esci</a>
+        </div>
+        """)
+
     coach_access_note = ""
     if session.get("is_coach_player_access"):
         coach_access_note = """
@@ -1511,23 +1550,11 @@ def player_home():
 
     # Il tasto "Storico prestazioni" è visibile solo ai calciatori normali,
     # non ai mister né al presidente (non hanno presenze in distinta).
-    is_staff = bool(session.get("is_staff_access"))
-    show_history = (not session.get("is_coach_player_access") and not session.get("is_pres_player_access")
-                    and not is_staff)
+    show_history = not session.get("is_coach_player_access") and not session.get("is_pres_player_access")
     history_btn = '<a class="btn btn-dark" href="/player/history">Storico prestazioni</a>' if show_history else ""
     stats_btn = '<a class="btn btn-dark" href="/player/stats">Le mie statistiche</a>' if show_history else ""
 
     gift_btn = '<a class="btn" style="background:linear-gradient(135deg,#b3202a,#1a7a2e);color:#fff;font-weight:900;" href="/player/christmas-gift">🎄 Christmas gift</a>'
-
-    if is_staff:
-        return page("Area staff", f"Ciao {session.get('player_name')}", f"""
-        <div class="card">
-            <h2>Area staff</h2>
-            <div class="small">Benvenuto! Da qui puoi partecipare al Christmas gift.</div>
-            {gift_btn}
-            <a class="btn" href="/logout">Esci</a>
-        </div>
-        """)
 
     content = pres_access_note + coach_access_note + f"""
     <div class="card">

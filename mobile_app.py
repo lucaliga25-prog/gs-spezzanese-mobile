@@ -1,4 +1,5 @@
 import os
+import random
 import base64
 import psycopg2
 from psycopg2.pool import SimpleConnectionPool
@@ -47,6 +48,14 @@ AUTHORIZED_PRES_ACCESS = {
 }
 
 
+# Staff societario: possono accedere e partecipare al Christmas gift.
+# Non compaiono mai in statistiche, rosa e formazioni (ruoli DS / DT).
+AUTHORIZED_STAFF_ACCESS = {
+    ("Sandro", "Marino"): "DS",
+    ("Enzo", "Sgambati"): "DT",
+}
+
+
 def _norm_name(value):
     return " ".join((value or "").strip().lower().split())
 
@@ -62,6 +71,16 @@ _AUTHORIZED_PRES_NORMALIZED = frozenset(
 
 def is_authorized_coach_name(first_name, last_name):
     return (_norm_name(first_name), _norm_name(last_name)) in _AUTHORIZED_COACH_NORMALIZED
+
+
+_STAFF_BY_NAME = {
+    (_norm_name(f), _norm_name(l)): role for (f, l), role in AUTHORIZED_STAFF_ACCESS.items()
+}
+
+
+def get_staff_role(first_name, last_name):
+    """Ritorna 'DS' / 'DT' se il nome è dello staff autorizzato, altrimenti None."""
+    return _STAFF_BY_NAME.get((_norm_name(first_name), _norm_name(last_name)))
 
 
 def is_authorized_pres_name(first_name, last_name):
@@ -257,6 +276,18 @@ def ensure_db():
                 )
             """)
 
+            # Christmas gift (babbo natale segreto): una riga per ogni partecipante.
+            # PK su giver  -> ognuno ha un solo destinatario.
+            # UNIQUE receiver -> nessun nome è assegnato a due persone.
+            # CHECK -> nessuno può pescare se stesso.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS secret_santa (
+                    giver_id INTEGER PRIMARY KEY REFERENCES players(id) ON DELETE CASCADE,
+                    receiver_id INTEGER NOT NULL UNIQUE REFERENCES players(id) ON DELETE CASCADE,
+                    CHECK (giver_id <> receiver_id)
+                )
+            """)
+
             cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS photo_data TEXT DEFAULT ''")
             cur.execute("ALTER TABLE players ADD COLUMN IF NOT EXISTS photo_mime TEXT DEFAULT ''")
             cur.execute("ALTER TABLE appearances ADD COLUMN IF NOT EXISTS starter INTEGER DEFAULT 0")
@@ -399,9 +430,87 @@ def get_players():
     return db_query("""
         SELECT id, first_name, last_name, role
         FROM players
-        WHERE LOWER(TRIM(COALESCE(role, ''))) NOT IN ('mister', 'pres')
+        WHERE LOWER(TRIM(COALESCE(role, ''))) NOT IN ('mister', 'pres', 'ds', 'dt')
         ORDER BY last_name, first_name
     """, fetch=True)
+
+
+SANTA_LOCK_KEY = 20261225
+
+
+def ensure_secret_santa():
+    """Garantisce che il sorteggio Christmas gift esista.
+
+    - Primo accesso: crea (se mancano) DS, DT, mister e presidente, poi sorteggia un unico ciclo
+      casuale tra tutti i record di `players` (A->B->C->...->A): nessuno pesca
+      se stesso e ogni nome è assegnato a una sola persona.
+    - Accessi successivi: non cambia nulla, il sorteggio resta fisso.
+    - Se un giocatore viene eliminato dalla rosa, richiude la catena
+      collegando chi lo aveva con chi lui aveva.
+    Il lock advisory evita doppi sorteggi se due persone aprono insieme.
+    """
+    conn = DB_POOL.getconn()
+    cur = None
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (SANTA_LOCK_KEY,))
+        cur.execute("SELECT giver_id, receiver_id FROM secret_santa")
+        edges = {g: r for g, r in cur.fetchall()}
+
+        if not edges:
+            # Tutte le persone con accesso speciale partecipano anche se non hanno
+            # ancora fatto login (i loro record vengono creati solo al primo accesso).
+            special_people = dict(AUTHORIZED_STAFF_ACCESS)
+            special_people.update({name: "MISTER" for name in AUTHORIZED_COACH_PLAYER_ACCESS})
+            special_people.update({name: "PRES" for name in AUTHORIZED_PRES_ACCESS})
+            for (first, last), role in special_people.items():
+                cur.execute(
+                    "SELECT 1 FROM players WHERE lower(trim(first_name))=lower(trim(%s)) "
+                    "AND lower(trim(last_name))=lower(trim(%s)) LIMIT 1",
+                    (first, last),
+                )
+                if not cur.fetchone():
+                    cur.execute(
+                        "INSERT INTO players (first_name, last_name, birth_date, role) VALUES (%s, %s, '', %s)",
+                        (first.strip().title(), last.strip().title(), role),
+                    )
+
+            cur.execute("SELECT id FROM players ORDER BY id")
+            ids = [r[0] for r in cur.fetchall()]
+            if len(ids) >= 2:
+                random.shuffle(ids)
+                rows = [(ids[i], ids[(i + 1) % len(ids)]) for i in range(len(ids))]
+                execute_batch(cur, "INSERT INTO secret_santa (giver_id, receiver_id) VALUES (%s, %s)", rows)
+        else:
+            free_givers = list(set(edges.values()) - set(edges.keys()))
+            free_receivers = list(set(edges.keys()) - set(edges.values()))
+            if free_givers and len(free_givers) == len(free_receivers):
+                random.shuffle(free_receivers)
+                execute_batch(
+                    cur,
+                    "INSERT INTO secret_santa (giver_id, receiver_id) VALUES (%s, %s)",
+                    list(zip(free_givers, free_receivers)),
+                )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        if cur is not None:
+            cur.close()
+        DB_POOL.putconn(conn)
+
+
+def get_christmas_gift_for(player_id):
+    """Ritorna il destinatario (first_name, last_name) del giocatore, o None."""
+    ensure_secret_santa()
+    rows = db_query("""
+        SELECT p.first_name, p.last_name
+        FROM secret_santa s
+        JOIN players p ON p.id = s.receiver_id
+        WHERE s.giver_id = ?
+    """, (player_id,), fetch=True)
+    return rows[0] if rows else None
 
 
 def match_progressive_numbers():
@@ -1284,6 +1393,12 @@ def home():
                     player = [coach_player]
                     is_coach_player_access = True
 
+            staff_role = get_staff_role(first_name, last_name)
+            if not player and staff_role:
+                staff_player = _get_or_create_special_player(first_name, last_name, staff_role)
+                if staff_player:
+                    player = [staff_player]
+
             if not player:
                 flash("Nome non autorizzato. Inserisci nome e cognome di un calciatore presente nel database oppure di uno dei mister autorizzati.")
                 return redirect(url_for("home"))
@@ -1294,6 +1409,7 @@ def home():
             session["player_name"] = f"{player[0]['last_name']} {player[0]['first_name']}"
             session["is_coach_player_access"] = 1 if is_coach_player_access else 0
             session["is_pres_player_access"] = 1 if is_pres_player_access else 0
+            session["is_staff_access"] = 1 if staff_role else 0
             return redirect(url_for("player_home"))
         if mode == "coach":
             if request.form.get("password", "") != APP_PASSWORD:
@@ -1395,9 +1511,23 @@ def player_home():
 
     # Il tasto "Storico prestazioni" è visibile solo ai calciatori normali,
     # non ai mister né al presidente (non hanno presenze in distinta).
-    show_history = not session.get("is_coach_player_access") and not session.get("is_pres_player_access")
+    is_staff = bool(session.get("is_staff_access"))
+    show_history = (not session.get("is_coach_player_access") and not session.get("is_pres_player_access")
+                    and not is_staff)
     history_btn = '<a class="btn btn-dark" href="/player/history">Storico prestazioni</a>' if show_history else ""
     stats_btn = '<a class="btn btn-dark" href="/player/stats">Le mie statistiche</a>' if show_history else ""
+
+    gift_btn = '<a class="btn" style="background:linear-gradient(135deg,#b3202a,#1a7a2e);color:#fff;font-weight:900;" href="/player/christmas-gift">🎄 Christmas gift</a>'
+
+    if is_staff:
+        return page("Area staff", f"Ciao {session.get('player_name')}", f"""
+        <div class="card">
+            <h2>Area staff</h2>
+            <div class="small">Benvenuto! Da qui puoi partecipare al Christmas gift.</div>
+            {gift_btn}
+            <a class="btn" href="/logout">Esci</a>
+        </div>
+        """)
 
     content = pres_access_note + coach_access_note + f"""
     <div class="card">
@@ -1417,6 +1547,7 @@ def player_home():
         {history_btn}
         {stats_btn}
         <a class="btn" style="background:linear-gradient(135deg,#b8860b,#f5c518);color:#0a0a0a;font-weight:900;" href="/awards">⚡ Figurine Premi</a>
+        {gift_btn}
         <a class="btn" href="/logout">Esci</a>
     </div>
     """
@@ -2028,7 +2159,7 @@ def player_votes(match_id):
 @login_required("coach")
 def coach_panel():
     content = """
-    <div class="card"><h2>Pannello allenatore</h2><div class="tabs"><a class="btn btn-blue" href="/coach/matches">Partite</a><a class="btn btn-green" href="/coach/formation">Formazione</a><a class="btn btn-dark" href="/coach/training">Allenamenti</a><a class="btn btn-dark" href="/coach/training-summary">Riepilogo allenamenti</a><a class="btn btn-blue" href="/coach/player-stats">Statistiche giocatori</a><a class="btn btn-green" href="/coach/players">Rosa giocatori</a><a class="btn" href="/logout">Esci</a></div></div>
+    <div class="card"><h2>Pannello allenatore</h2><div class="tabs"><a class="btn btn-blue" href="/coach/matches">Partite</a><a class="btn btn-green" href="/coach/formation">Formazione</a><a class="btn btn-dark" href="/coach/training">Allenamenti</a><a class="btn btn-dark" href="/coach/training-summary">Riepilogo allenamenti</a><a class="btn btn-blue" href="/coach/player-stats">Statistiche giocatori</a><a class="btn btn-green" href="/coach/players">Rosa giocatori</a><a class="btn btn-dark" href="/coach/christmas-gift">🎄 Christmas gift</a><a class="btn" href="/logout">Esci</a></div></div>
     """
     return page("Allenatore", "Gestione rapida da telefono", content)
 
@@ -2047,6 +2178,80 @@ ROLE_CHOICES = [
     ("ED", "Esterno Destro"),
     ("ES", "Esterno Sinistro"),
 ]
+
+
+@app.route("/player/christmas-gift")
+@login_required("player")
+def christmas_gift():
+    target = get_christmas_gift_for(session["player_id"])
+
+    if target:
+        name = f"{target['first_name']} {target['last_name']}"
+        body = f"""
+        <div class="small">Sei il Babbo Natale segreto di una persona della squadra. Tieni il segreto! 🤫</div>
+        <button type="button" class="btn-green" id="gift-reveal"
+                onclick="document.getElementById('gift-name').style.display='block';this.style.display='none';">
+            🎁 Scopri a chi devi fare il regalo
+        </button>
+        <div id="gift-name" style="display:none;text-align:center;margin:18px 0;">
+            <div class="small">Il tuo regalo è per</div>
+            <div style="font-size:28px;font-weight:900;color:var(--gold-light);margin-top:6px;">{name}</div>
+        </div>
+        """
+    else:
+        body = """
+        <div class="small">Non sei presente nel sorteggio. Il sorteggio è già stato fatto prima del tuo inserimento
+        oppure non ci sono abbastanza partecipanti: chiedi all'allenatore di rifarlo.</div>
+        """
+
+    content = f"""
+    <div class="card">
+        <h2>🎄 Christmas gift</h2>
+        {body}
+    </div>
+    <a class="btn btn-blue" href="/player">Indietro</a>
+    """
+    return page("Christmas gift", f"Ciao {session.get('player_name')}", content)
+
+
+@app.route("/coach/christmas-gift", methods=["GET", "POST"])
+@login_required("coach")
+def coach_christmas_gift():
+    if request.method == "POST":
+        if request.form.get("action") == "reset":
+            db_query("DELETE FROM secret_santa")
+            ensure_secret_santa()
+            flash("Sorteggio rifatto con tutti i partecipanti attuali.")
+        return redirect(url_for("coach_christmas_gift"))
+
+    ensure_secret_santa()
+    rows = db_query("SELECT COUNT(*) AS n FROM secret_santa", fetch=True)
+    n = rows[0]["n"] if rows else 0
+
+    content = f"""
+    <div class="card">
+        <h2>🎄 Christmas gift</h2>
+        <div class="small">Partecipanti nel sorteggio: <b>{n}</b>. Gli abbinamenti sono segreti e restano fissi.
+        Se hai aggiunto o tolto persone dalla rosa e vuoi includerle, rifai il sorteggio (le persone vedranno un nuovo nome).</div>
+        <button type="button" class="btn-red" onclick="document.getElementById('reset-modal').classList.add('open')">Rifai sorteggio</button>
+    </div>
+    <a class="btn btn-blue" href="/coach">Indietro</a>
+
+    <div class="modal-overlay" id="reset-modal">
+        <div class="modal-box">
+            <h3>Rifare il sorteggio?</h3>
+            <p class="small">Tutti i destinatari attuali verranno cancellati e riassegnati a caso.</p>
+            <form method="post">
+                <input type="hidden" name="action" value="reset">
+                <div class="modal-actions">
+                    <button type="button" class="btn-dark" onclick="document.getElementById('reset-modal').classList.remove('open')">Annulla</button>
+                    <button type="submit" class="btn-red">Rifai</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    """
+    return page("Christmas gift", "Area allenatore", content)
 
 
 @app.route("/coach/players", methods=["GET", "POST"])
@@ -2091,7 +2296,7 @@ def coach_players():
     players = db_query("""
         SELECT id, first_name, last_name, COALESCE(birth_date,'') AS birth_date, COALESCE(role,'') AS role
         FROM players
-        WHERE LOWER(TRIM(COALESCE(role,''))) NOT IN ('mister', 'pres')
+        WHERE LOWER(TRIM(COALESCE(role,''))) NOT IN ('mister', 'pres', 'ds', 'dt')
         ORDER BY last_name, first_name
     """, fetch=True)
 
@@ -2279,7 +2484,7 @@ def get_player_stats_rows(start_filter, end_filter, player_id_filter=None, compe
             GROUP BY v.voted_player_id
         ) vt ON vt.player_id=p.id
 
-        WHERE LOWER(TRIM(COALESCE(p.role, ''))) NOT IN ('mister', 'pres')
+        WHERE LOWER(TRIM(COALESCE(p.role, ''))) NOT IN ('mister', 'pres', 'ds', 'dt')
           """ + ("AND p.id=?" if player_id_filter is not None else "") + """
         ORDER BY COALESCE(ms.minuti,0) DESC, p.last_name, p.first_name
     """, (
